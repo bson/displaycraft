@@ -1,5 +1,6 @@
-//! How KDE arranges the outputs, from `kscreen-doctor -j`, for drawing them
-//! as System Settings does.
+//! How the displays are arranged, for drawing them as System Settings does:
+//! from KDE (`kscreen-doctor -j`), or elsewhere from ArgyllCMS's display
+//! list, which gives each one's position and size.
 
 use std::process::{Command, Stdio};
 
@@ -21,6 +22,9 @@ pub struct Output {
     pub enabled: bool,
     /// Shows another output's picture rather than its own
     pub mirrored: bool,
+    /// Its place in ArgyllCMS's display list, when made from that list
+    /// rather than matched by name
+    pub argyll_index: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -92,10 +96,53 @@ pub fn parse(json: &str) -> Option<Vec<Output>> {
                     primary: o.priority == 1,
                     enabled: o.enabled,
                     mirrored: o.replication_source != 0,
+                    argyll_index: None,
                 }
             })
             .collect(),
     )
+}
+
+/// The name to show for an ArgyllCMS display description:
+/// "Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, ..." ->
+/// "eDP-1 (Sharp Corporation eDP-1)". On macOS there's no "Output", and a
+/// comma before "at": "Built-in Display, at 0, 0, ..." -> "Built-in Display".
+pub fn display_name(description: &str) -> String {
+    let text = description.split(", ").find_map(|p| p.strip_prefix("Output ")).unwrap_or(description);
+    text.split(" at ").next().unwrap_or(text).trim_end_matches([',', ' ']).to_string()
+}
+
+/// The arrangement from ArgyllCMS's display descriptions, where KDE can't
+/// say: "... at 0, 0, width 2624, height 1696 (Primary Display)". Sizes are
+/// the desktop's coordinates, so they're also what's shown as the size.
+/// Displays whose description doesn't parse are left out.
+pub fn from_argyll(descriptions: &[String]) -> Vec<Output> {
+    descriptions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| {
+            let (_, place) = d.split_once(" at ")?;
+            let nums: Vec<f64> = place
+                .split([',', ' ', '('])
+                .filter(|w| !w.is_empty() && !matches!(*w, "width" | "height"))
+                .take(4)
+                .map(|w| w.parse().ok())
+                .collect::<Option<_>>()?;
+            let [x, y, width, height] = nums[..] else { return None };
+            Some(Output {
+                name: display_name(d),
+                x,
+                y,
+                width,
+                height,
+                pixels: (width as u32, height as u32),
+                primary: d.contains("Primary"),
+                enabled: true,
+                mirrored: false,
+                argyll_index: Some(i),
+            })
+        })
+        .collect()
 }
 
 /// Ask KDE. None if kscreen-doctor isn't there or says nothing usable.
@@ -125,5 +172,17 @@ mod tests {
         assert_eq!((o[1].width, o[1].height, o[1].pixels), (1200.0, 1920.0, (1920, 1200)), "rotated a quarter turn");
         assert!(!o[2].enabled && o[2].mirrored);
         assert!(parse("not json").is_none());
+    }
+
+    #[test]
+    fn arrangement_from_argyll() {
+        let o = from_argyll(&[
+            "Built-in Display, at 0, 0, width 2624, height 1696 (Primary Display)".into(),
+            "DELL U2413, at 2624, -200, width 1920, height 1200".into(),
+            "Something odd".into(),
+        ]);
+        assert_eq!(o.len(), 2);
+        assert_eq!((o[0].name.as_str(), o[0].width, o[0].height, o[0].primary), ("Built-in Display", 2624.0, 1696.0, true));
+        assert_eq!((o[1].x, o[1].y, o[1].argyll_index, o[1].primary), (2624.0, -200.0, Some(1), false));
     }
 }

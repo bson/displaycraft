@@ -76,14 +76,18 @@ impl System for MacOs {
     }
 
     /// Inside DisplayCraft.app, beside the executable in Contents/MacOS:
-    /// Contents/Resources/argyll/bin
+    /// Contents/Resources/argyll/bin. Run from a source checkout, an
+    /// installed DisplayCraft.app's stands in for it, as /opt's does on
+    /// Linux.
     fn bundled_dir(&self) -> Option<PathBuf> {
         if let Some(dir) = std::env::var_os("DISPLAYCRAFT_ARGYLL_BIN") {
             return Some(PathBuf::from(dir));
         }
+        let inside = |app: &std::path::Path| Some(app.join("Contents/Resources/argyll/bin")).filter(|d| d.join("dispcal").exists());
         let exe = std::env::current_exe().ok()?;
-        let dir = exe.parent()?.parent()?.join("Resources/argyll/bin");
-        dir.join("dispcal").exists().then_some(dir)
+        let own = exe.parent()?.parent()?.parent()?.to_path_buf();
+        let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications/DisplayCraft.app"));
+        [Some(own), Some(PathBuf::from("/Applications/DisplayCraft.app")), home].into_iter().flatten().find_map(|app| inside(&app))
     }
 
     fn no_bundled(&self) -> &'static str {

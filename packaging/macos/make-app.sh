@@ -1,30 +1,76 @@
 #!/bin/bash
 # Build DisplayCraft and the modified ArgyllCMS on macOS, then
-# DisplayCraft.app, in a disk image. Runs on a GitHub Actions macOS runner (see
-# .github/workflows/build.yml), or on a Mac with Xcode's command line tools
-# and Rust. Builds for the Mac's own architecture.
+# DisplayCraft.app, in a disk image. Runs on a GitHub Actions macOS runner
+# (see .github/workflows/build.yml), or on a Mac with Xcode's command line
+# tools and Rust (rustup). Builds for the Mac's own architecture.
 #
-# Settings, from the environment:
-#   SRC          this repository (default: the one this script is in)
-#   ARGYLL_SRC   the modified ArgyllCMS (default: $SRC/argyllcms, the submodule)
-#   CACHE        jam and build output, kept between builds
-#                (default: $SRC/tmp/macos-cache)
-#   OUT          where the disk image goes (default: $SRC/dist)
-#   WORK         scratch space, emptied first (default: $SRC/tmp/macos-work)
+#   packaging/macos/make-app.sh [options]
+#
+#   --src DIR          this repository (default: the one this script is in)
+#   --argyll-src DIR   the modified ArgyllCMS (default: <src>/argyllcms, the
+#                      submodule)
+#   --cache DIR        jam and build output, kept between builds
+#                      (default: <src>/tmp/macos-cache)
+#   --out DIR          where the disk image goes (default: <src>/dist)
+#   --work DIR         scratch space, emptied first
+#                      (default: <src>/tmp/macos-work)
+#   --rust-home DIR    where rustup put .cargo and .rustup (default: the
+#                      user's home folder)
+#   --release-tag TAG  a release build for TAG, which must be v<version in
+#                      Cargo.toml>
+#
+# Nothing is taken from the environment: the script starts itself again in
+# one made from these options, so a shell's settings can't change the build
+# (jam, for one, makes every environment variable a build setting).
 set -euo pipefail
 
-SRC=${SRC:-$(cd "$(dirname "$0")/../.." && pwd)}
-ARGYLL_SRC=${ARGYLL_SRC:-$SRC/argyllcms}
-CACHE=${CACHE:-$SRC/tmp/macos-cache}
-OUT=${OUT:-$SRC/dist}
-WORK=${WORK:-$SRC/tmp/macos-work}
-mkdir -p "$CACHE" "$OUT"
+inner=false
+if [ "${1:-}" = --in-clean-env ]; then
+    inner=true
+    shift
+fi
+src=$(cd "$(dirname "$0")/../.." && pwd)
+argyll_src= cache= out= work= release_tag=
+# From the user database rather than $HOME
+home=$(eval echo "~$(id -un)")
+rust_home=$home
+while [ $# -gt 0 ]; do
+    case $1 in
+        --src) src=$2 ;;
+        --argyll-src) argyll_src=$2 ;;
+        --cache) cache=$2 ;;
+        --out) out=$2 ;;
+        --work) work=$2 ;;
+        --rust-home) rust_home=$2 ;;
+        --release-tag) release_tag=$2 ;;
+        *) echo "Unknown option $1 (see the top of $0)" >&2; exit 2 ;;
+    esac
+    shift 2
+done
+src=$(cd "$src" && pwd)
+argyll_src=$(cd "${argyll_src:-$src/argyllcms}" && pwd)
+cache=$(mkdir -p "${cache:-$src/tmp/macos-cache}" && cd "${cache:-$src/tmp/macos-cache}" && pwd)
+out=$(mkdir -p "${out:-$src/dist}" && cd "${out:-$src/dist}" && pwd)
+work=$(mkdir -p "${work:-$src/tmp/macos-work}" && cd "${work:-$src/tmp/macos-work}" && pwd)
 
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$SRC/Cargo.toml" | head -1)
-# A release tag must name this version, or the release and the app would
+if ! $inner; then
+    mkdir -p "$cache/tmp"
+    # git's global settings (ignore rules among them) would change what's
+    # copied, so it gets a config of its own
+    exec /usr/bin/env -i \
+        HOME="$home" \
+        PATH="$rust_home/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        CARGO_HOME="$rust_home/.cargo" RUSTUP_HOME="$rust_home/.rustup" \
+        TMPDIR="$cache/tmp" GIT_CONFIG_GLOBAL="$cache/gitconfig" \
+        /bin/bash "$0" --in-clean-env --src "$src" --argyll-src "$argyll_src" --cache "$cache" \
+        --out "$out" --work "$work" --rust-home "$rust_home" --release-tag "$release_tag"
+fi
+
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$src/Cargo.toml" | head -1)
+# A release must be of this version, or the release and the app would
 # disagree
-if [ "${GITHUB_REF_TYPE:-}" = tag ] && [ "${GITHUB_REF_NAME:-}" != "v$version" ]; then
-    echo "Tag ${GITHUB_REF_NAME} doesn't match version $version in Cargo.toml" >&2
+if [ -n "$release_tag" ] && [ "$release_tag" != "v$version" ]; then
+    echo "Tag $release_tag doesn't match version $version in Cargo.toml" >&2
     exit 1
 fi
 arch=$(uname -m)
@@ -39,13 +85,13 @@ export MACOSX_DEPLOYMENT_TARGET=11.0
 # ArgyllCMS names its Jambase with -f anyway.
 jam_version=2.5.2-1.3.3
 jam_sha256=57c3768bd7954ea97600b823018c1d89419f52e0ea385ac10591ad16716dca26
-jam=$CACHE/ajam-$jam_version/jam0
+jam=$cache/ajam-$jam_version/jam0
 if [ ! -x "$jam" ]; then
-    curl -sSfL -o "$CACHE/ajam.tgz" "https://www.argyllcms.com/ajam-$jam_version.tgz"
-    echo "$jam_sha256  $CACHE/ajam.tgz" | shasum -a 256 -c -
-    tar -C "$CACHE" -xzf "$CACHE/ajam.tgz"
+    curl -sSfL -o "$cache/ajam.tgz" "https://www.argyllcms.com/ajam-$jam_version.tgz"
+    echo "$jam_sha256  $cache/ajam.tgz" | shasum -a 256 -c -
+    tar -C "$cache" -xzf "$cache/ajam.tgz"
     # Old C, which current clang rejects by default without these
-    make -C "$CACHE/ajam-$jam_version" CC=cc \
+    make -C "$cache/ajam-$jam_version" CC=cc \
         CFLAGS="-O2 -Wno-implicit-function-declaration -Wno-implicit-int -Wno-int-conversion" jam0
 fi
 
@@ -61,38 +107,45 @@ copy_tree() {
         | tar -C "$1" --null -n -T - -cf - | tar -C "$2" -xf -
 }
 
-rm -rf "$WORK" && mkdir -p "$WORK"
+rm -rf "$work" && mkdir -p "$work"
 
 # ArgyllCMS, with its own copies of TIFF, JPEG, PNG, zlib and SSL, so the
 # app doesn't depend on Homebrew's
-copy_tree "$ARGYLL_SRC" "$WORK/argyllcms"
-argyll_commit=$(git -C "$ARGYLL_SRC" rev-parse HEAD)
-argyll_dirty=$(git -C "$ARGYLL_SRC" status --porcelain --untracked-files=no | head -c1)
-cd "$WORK/argyllcms"
+copy_tree "$argyll_src" "$work/argyllcms"
+argyll_commit=$(git -C "$argyll_src" rev-parse HEAD)
+argyll_dirty=$(git -C "$argyll_src" status --porcelain --untracked-files=no | head -c1)
+cd "$work/argyllcms"
+# Jambase reads these, which are bash's own rather than the user's
 export OSTYPE MACHTYPE HOSTTYPE
 "$jam" -q -fJambase -j"$(sysctl -n hw.ncpu)" \
     -sBUILTIN_TIFF=true -sBUILTIN_JPEG=true -sBUILTIN_PNG=true -sBUILTIN_Z=true -sBUILTIN_SSL=true \
-    -sDESTDIR="$WORK/argyll" install >"$WORK/argyll-build.log" 2>&1 \
-    || { tail -60 "$WORK/argyll-build.log"; exit 1; }
+    -sDESTDIR="$work/argyll" install >"$work/argyll-build.log" 2>&1 \
+    || { tail -60 "$work/argyll-build.log"; exit 1; }
+# jam can succeed having built nothing
+if [ ! -x "$work/argyll/bin/dispcal" ]; then
+    tail -60 "$work/argyll-build.log"
+    echo "ArgyllCMS's build installed no programs (log above)" >&2
+    exit 1
+fi
 
 # DisplayCraft, from a copy so the source isn't written to
-copy_tree "$SRC" "$WORK/displaycraft"
-cd "$WORK/displaycraft"
-CARGO_TARGET_DIR=$CACHE/target cargo build --release --locked -q
+copy_tree "$src" "$work/displaycraft"
+cd "$work/displaycraft"
+CARGO_TARGET_DIR=$cache/target cargo build --release --locked -q
 
 # The app. DisplayCraft finds its ArgyllCMS in Contents/Resources/argyll
 # (system::MacOs::bundled_dir), and the corrections beside its bin folder.
-app=$WORK/DisplayCraft.app
+app=$work/DisplayCraft.app
 res=$app/Contents/Resources
 mkdir -p "$app/Contents/MacOS" "$res/argyll/bin" "$res/doc"
-cp "$CACHE/target/release/displaycraft" "$app/Contents/MacOS/"
+cp "$cache/target/release/displaycraft" "$app/Contents/MacOS/"
 for p in dispcal dispread dispwin targen colprof fakeread colverify spotread ccxxmake oeminst iccdump; do
-    cp "$WORK/argyll/bin/$p" "$res/argyll/bin/"
+    cp "$work/argyll/bin/$p" "$res/argyll/bin/"
 done
 strip "$res"/argyll/bin/* "$app/Contents/MacOS/displaycraft"
-cp -R "$WORK/argyll/ref" "$res/argyll/ref"
+cp -R "$work/argyll/ref" "$res/argyll/ref"
 cp LICENSE-MIT LICENSE-APACHE NOTICE "$res/doc/"
-cp "$WORK/argyllcms/License.txt" "$res/doc/ArgyllCMS-LICENSE.txt"
+cp "$work/argyllcms/License.txt" "$res/doc/ArgyllCMS-LICENSE.txt"
 # Which source this was built from, as the AGPL asks
 {
     cat packaging/ARGYLLCMS.txt
@@ -100,7 +153,7 @@ cp "$WORK/argyllcms/License.txt" "$res/doc/ArgyllCMS-LICENSE.txt"
 } >"$res/doc/ARGYLLCMS.txt"
 
 # The icon, from the PNG sizes there are (no 1024 for 512@2x)
-iconset=$WORK/DisplayCraft.iconset
+iconset=$work/DisplayCraft.iconset
 mkdir -p "$iconset"
 for s in 16 32 128 256 512; do
     cp "assets/icons/hicolor/${s}x${s}/apps/displaycraft.png" "$iconset/icon_${s}x${s}.png"
@@ -154,10 +207,10 @@ codesign --verify --deep --strict "$app"
 # A disk image rather than a zip: one file to download, keeping the app's
 # signature and file modes, opened with a double-click. The Applications
 # link is the usual drag-to-install.
-dmgroot=$WORK/dmg
+dmgroot=$work/dmg
 mkdir -p "$dmgroot"
 cp -R "$app" "$dmgroot/"
 ln -s /Applications "$dmgroot/Applications"
-dmg=$OUT/DisplayCraft-$version-macos-$arch.dmg
+dmg=$out/DisplayCraft-$version-macos-$arch.dmg
 hdiutil create -quiet -ov -volname "DisplayCraft $version" -srcfolder "$dmgroot" -fs HFS+ -format UDZO "$dmg"
 ls -l "$dmg"

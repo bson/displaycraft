@@ -21,9 +21,6 @@ permissions:
 jobs:
   appimage:
     runs-on: ubuntu-24.04
-    env:
-      CACHE: ${{ github.workspace }}/../cache
-      OUT: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@v5
         with:
@@ -36,8 +33,11 @@ jobs:
           key: appimage-${{ hashFiles('Cargo.lock') }}
           restore-keys: appimage-
 
+      # The tag is passed only for a tag build, which must match Cargo.toml
       - name: Build the AppImage
-        run: packaging/appimage/make-appimage.sh
+        run: >
+          packaging/appimage/make-appimage.sh --cache "${{ github.workspace }}/../cache"
+          --out dist --release-tag "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
 
       # Uploaded as it is rather than zipped; the artifact takes the file's
       # name
@@ -50,9 +50,6 @@ jobs:
   # Apple Silicon only for now
   macos:
     runs-on: macos-15
-    env:
-      CACHE: ${{ github.workspace }}/../cache
-      OUT: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@v5
         with:
@@ -66,7 +63,9 @@ jobs:
           restore-keys: macos-
 
       - name: Build the app
-        run: packaging/macos/make-app.sh
+        run: >
+          packaging/macos/make-app.sh --cache "${{ github.workspace }}/../cache"
+          --out dist --release-tag "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
 
       # The disk image as it is, rather than zipped
       - uses: actions/upload-artifact@v7

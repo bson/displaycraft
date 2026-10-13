@@ -11,7 +11,7 @@ use crate::adjust::{self, Dir};
 use crate::argyll::{self, Event, Inventory, Job, Platform, Session, WindowSystem};
 use crate::charts;
 use crate::corrections::{self, Correction};
-use crate::layout;
+use crate::layout::{self, display_name};
 use crate::profiles;
 use crate::report;
 use crate::settings::Settings;
@@ -462,7 +462,12 @@ impl App {
                     format!("Couldn't run dispcal in {}: {e}. Check the ArgyllCMS directory in Preferences.", bin.display())
                 }),
             };
-            let layout = layout::read().unwrap_or_default();
+            // KDE's arrangement where there is one, which has more to show;
+            // otherwise ArgyllCMS's display list gives positions and sizes
+            let layout = layout::read().unwrap_or_else(|| {
+                let descriptions: Vec<String> = inventory.as_ref().map(|i| i.displays.iter().map(|d| d.description.clone()).collect()).unwrap_or_default();
+                layout::from_argyll(&descriptions)
+            });
             let blocked = usbaccess::blocked();
             let _ = tx.send(Scan { session, inventory, layout, blocked });
             ctx.request_repaint();
@@ -1289,7 +1294,7 @@ impl App {
         }
     }
 
-    /// The outputs as KDE arranges them; clicking one returns its index in
+    /// The displays as they're arranged; clicking one returns its index in
     /// Argyll's display list. Outputs Argyll doesn't list, or that are off
     /// or mirroring another, are drawn dimmed and can't be chosen.
     fn display_map(&self, ui: &mut egui::Ui) -> Option<usize> {
@@ -1308,7 +1313,6 @@ impl App {
         let (dw, dh) = (((x1 - x0) * scale) as f32, ((y1 - y0) * scale) as f32);
         let origin = rect.min + egui::vec2((width - dw) / 2.0, (height - dh) / 2.0);
         let painter = ui.painter_at(rect);
-        let selected_name = self.inventory.displays.get(self.display).map(|d| output_name(&d.description));
         let mut clicked = None;
         for o in shown {
             let r = egui::Rect::from_min_size(
@@ -1316,11 +1320,11 @@ impl App {
                 egui::vec2((o.width * scale) as f32, (o.height * scale) as f32),
             )
             .shrink(3.0);
-            let index = self.inventory.displays.iter().position(|d| output_name(&d.description) == o.name);
+            let index = o.argyll_index.or_else(|| self.inventory.displays.iter().position(|d| output_name(&d.description) == o.name));
             let response = ui.interact(r, ui.id().with(("display-map", &o.name)), if index.is_some() { egui::Sense::click() } else { egui::Sense::hover() });
             // Named for screen readers (and tests), like a button
             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, index.is_some(), &o.name));
-            let selected = selected_name.as_deref() == Some(o.name.as_str());
+            let selected = index == Some(self.display);
             let fill = if selected {
                 t.accent.gamma_multiply(0.55)
             } else if response.hovered() && index.is_some() {
@@ -2685,14 +2689,6 @@ fn with_field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         ui.spacing_mut().item_spacing.x = 6.0;
         add(ui);
     });
-}
-
-/// "Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, ..." ->
-/// "eDP-1 (Sharp Corporation eDP-1)". On macOS there's no "Output", and a
-/// comma before "at": "Built-in Display, at 0, 0, ..." -> "Built-in Display".
-fn display_name(description: &str) -> String {
-    let text = description.split(", ").find_map(|p| p.strip_prefix("Output ")).unwrap_or(description);
-    text.split(" at ").next().unwrap_or(text).trim_end_matches([',', ' ']).to_string()
 }
 
 /// The output a DisplayCraft profile was made for, from its name

@@ -22,7 +22,8 @@
   missing. Linux: auto, KDE + Wayland and GNOME, KDE + X11, with
   `/opt/argyll-kde-wayland/bin` standing in when run from source. macOS
   (`MacOs`): one "Bundled ArgyllCMS", in `Contents/Resources/argyll/bin`
-  of the app the executable is in. Windows (`Single`, not yet packaged):
+  of the app the executable is in, or when run from source, of an
+  installed `DisplayCraft.app` (`/Applications`, then `~/Applications`). Windows (`Single`, not yet packaged):
   one "Bundled ArgyllCMS", from `$DISPLAYCRAFT_ARGYLL_BIN`. Also `open()`,
   for files and links: xdg-open, `open` on macOS, `cmd /C start ""` on
   Windows. Checked to compile (`cargo check`) for `aarch64-apple-darwin`
@@ -58,8 +59,8 @@
   drawn with egui or written as SVG; the CIE 1931 spectral locus.
 - `src/report.rs`: the display report's patch set, `.ti3` reading and the
   arithmetic (gamma fit, CCT, u'v' gamut coverage).
-- `src/layout.rs`: KDE's arrangement of the outputs, from `kscreen-doctor
-  -j`.
+- `src/layout.rs`: the arrangement of the displays, from `kscreen-doctor
+  -j` or else ArgyllCMS's display list, and `display_name()`.
 - `src/profiles.rs`: reading ICC profiles (description, date, white point),
   listing them, the last verification verdict, and KWin's state for an
   output from `kscreen-doctor -o`.
@@ -303,11 +304,17 @@ logical, so sizes are divided by the scale and swapped for a quarter turn
 fit 600 × 190 points (`display_map()`), each labelled with its name, model
 (from Argyll's description), mode size and "primary", the selected one in
 the accent colour. Each is matched to Argyll's display list by output name,
-the same in both; one Argyll doesn't list is marked and can't be chosen.
+the same in both, or by `argyll_index` for outputs made from Argyll's
+list; one Argyll doesn't list is marked and can't be chosen.
 Clicking one selects it, the same selection as the dropdown below (and the
 Profiles page). Off or mirroring outputs are listed under the map. The
 rectangles are labelled for accessibility, which is also how tests click
-them. Without kscreen-doctor there's no map, only the dropdown. A monitor
+them. Without kscreen-doctor (macOS, GNOME, other X11 desktops) the map
+comes from Argyll's display list (`layout::from_argyll()`): each
+description's "at X, Y, width W, height H" in desktop coordinates, which
+also stand in for the size shown, "Primary" in it marking the primary,
+the name from `display_name()`, and its place in the list kept in
+`argyll_index`; descriptions that don't parse are left out. A monitor
 plugged in later appears after Refresh.
 
 To check with real monitors: plug them in and press Refresh on the Display
@@ -333,19 +340,39 @@ picture, and the install itself hasn't been run.
 
 ## Packaging
 
+The build scripts (`appimage/build.sh`, `appimage/make-appimage.sh`,
+`macos/make-app.sh`) take no settings from the environment: everything is
+a command-line option with a default (`--src`, `--argyll-src`, `--cache`,
+`--out`, `--work`, `--rust-home`, `--release-tag`; `build.sh`: `--argyll-src`,
+`--out`, `--engine`), and the tools run in an environment the script
+constructs. `make-appimage.sh` and `make-app.sh` start themselves again
+under `env -i` (marked by a first argument `--in-clean-env`) with only
+`HOME` (from the user database, `~user`, not `$HOME`), `PATH` (Rust's bin
+and the system's directories), `CARGO_HOME`, `RUSTUP_HOME`, `TMPDIR` (in
+the cache) and `GIT_CONFIG_GLOBAL` (a file in the cache, so neither the
+user's git settings, ignore rules included, nor their `~/.gitconfig` are
+involved). This matters for jam above all, which makes every environment
+variable a build setting: run from one terminal session on the Mac, before
+this, ArgyllCMS's build found 2 targets, built nothing and succeeded.
+`build.sh` runs podman or docker under `env -i` with `HOME`, `PATH` and
+`XDG_RUNTIME_DIR` (`/run/user/<uid>`, which rootless podman needs), and
+passes the build its options. apt gets `DEBIAN_FRONTEND` on its command
+line, since sudo drops the environment. The workflow passes `--cache`,
+`--out` and, for a tag build, `--release-tag`.
+
 The Wayland ArgyllCMS is the `argyllcms` submodule, https://github.com/bson/ArgyllCMS
 (HTTPS in `.gitmodules` so anyone can clone it; the local checkout pushes
-over SSH). `ARGYLL_SRC` builds from another checkout instead. A submodule's
+over SSH). `--argyll-src` builds from another checkout instead. A submodule's
 git data is in DisplayCraft's `.git`, so in the container it's reached
 through DisplayCraft's mount; another checkout gets a mount of its own.
 
 `packaging/appimage/make-appimage.sh` does the build on Ubuntu 24.04
 (glibc 2.39, the oldest base with Plasma 6.4+): `build.sh` runs it in a
 podman or docker container, and the GitHub workflow runs it directly on an
-ubuntu-24.04 runner. It uses `sudo` for apt only when not root, and an
-installed rustup if there is one (the runners have it), otherwise one kept in
-the cache. For a tag build it stops unless the tag is `v` plus Cargo.toml's
-version. The sources are mounted read-only and copied as git sees them
+ubuntu-24.04 runner. It uses `sudo` for apt only when not root, and the
+rustup in `--rust-home` if there is one (the runners have it), otherwise
+one kept in the cache. Given `--release-tag`, it stops unless the tag is
+`v` plus Cargo.toml's version. The sources are mounted read-only and copied as git sees them
 (tracked and new files, not ignored ones), so host build output, ArgyllCMS's
 in-tree objects in particular, doesn't get linked in. ArgyllCMS is built
 with `-sBUILTIN_TIFF/JPEG/PNG/Z/SSL=true`, as its own release script does,
@@ -382,8 +409,10 @@ so it builds ArgyllCMS's own Jam 2.5 (`ajam-2.5.2-1.3.3.tgz` from
 argyllcms.com, checked by SHA-256), only its first stage `jam0`, with
 warnings current clang treats as errors turned off; it's cached. Sources
 are copied as for the AppImage, ArgyllCMS built with the same
-`-sBUILTIN_*` options (so nothing comes from Homebrew), DisplayCraft with
-`cargo --locked`. `DisplayCraft.app`: `Contents/MacOS/displaycraft`, the
+`-sBUILTIN_*` options (so nothing comes from Homebrew; the clean
+environment keeps Homebrew's directories off `PATH` too), stopping if it
+installed no `dispcal`, since jam can succeed having built nothing,
+DisplayCraft with `cargo --locked`. `DisplayCraft.app`: `Contents/MacOS/displaycraft`, the
 same eleven ArgyllCMS programs in `Contents/Resources/argyll/bin` and the
 corrections in `.../argyll/ref` (`system::MacOs::bundled_dir()` looks
 there, beside the executable, unless `DISPLAYCRAFT_ARGYLL_BIN` is set),

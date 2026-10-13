@@ -29,8 +29,8 @@ DisplayCraft is not affiliated with ArtCraft.
 
 - KDE Plasma on Wayland, which is what DisplayCraft is developed and tested
   on. X11 sessions (Plasma, GNOME) and other Wayland desktops should work
-  through ArgyllCMS's X11 support, but haven't been tried yet; the display
-  map and which profile is in use come from KDE. ArgyllCMS checks the
+  through ArgyllCMS's X11 support, but haven't been tried yet; which
+  profile is in use comes from KDE. ArgyllCMS checks the
   platform when DisplayCraft starts, and DisplayCraft won't run anywhere it
   reports the platform as unsupported.
 - ArgyllCMS. The AppImage comes with its own, which works with KDE Plasma on
@@ -84,7 +84,9 @@ Apple Silicon. The app isn't signed with an Apple Developer ID, so macOS
 asks before the first launch: allow it in System Settings > Privacy &
 Security, or run `xattr -dr com.apple.quarantine DisplayCraft.app`. On
 macOS DisplayCraft builds and starts, but measuring hasn't been made to
-work there yet.
+work there yet. Run from source (`cargo run --release`), it uses the
+ArgyllCMS inside an installed `DisplayCraft.app`, in `/Applications` or
+`~/Applications`.
 
 ## Releases
 

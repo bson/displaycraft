@@ -2734,12 +2734,15 @@ fn prompt_message(prompt: &str, before: &[String]) -> String {
 }
 
 /// "/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)" ->
-/// "X-Rite i1 DisplayPro, ColorMunki Display"
+/// "i1Display Pro or ColorMunki Display"
 fn instrument_name(description: &str) -> &str {
-    description
-        .split_once(" (")
-        .and_then(|(_, rest)| rest.strip_suffix(')'))
-        .unwrap_or(description)
+    let name = description.split_once(" (").and_then(|(_, rest)| rest.strip_suffix(')')).unwrap_or(description);
+    // The one instrument Argyll lists under both names it's sold as. A
+    // general ", " -> " or " would break others, e.g. "Q, Inc Prisma".
+    match name {
+        "X-Rite i1 DisplayPro, ColorMunki Display" => "i1Display Pro or ColorMunki Display",
+        _ => name,
+    }
 }
 
 /// "Monitor 1, Output eDP-1 (Sharp ...) at 0, 0, ..." -> "eDP-1"
@@ -3086,7 +3089,8 @@ mod tests {
 
     #[test]
     fn instrument_name_from_description() {
-        assert_eq!(instrument_name("/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)"), "X-Rite i1 DisplayPro, ColorMunki Display");
+        assert_eq!(instrument_name("/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)"), "i1Display Pro or ColorMunki Display");
+        assert_eq!(instrument_name("/dev/ttyUSB0 (Q, Inc Prisma)"), "Q, Inc Prisma");
         assert_eq!(instrument_name("Spyder"), "Spyder");
     }
 

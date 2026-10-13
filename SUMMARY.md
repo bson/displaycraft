@@ -166,6 +166,11 @@ new scan replaces a running one, whose result is dropped.
   attached, and are dropped), and the `-y` display types (either an
   instrument specific list on following lines, or the `Other: l = LCD, c =
   CRT` fallback).
+- Instruments are shown by the name in parentheses (`instrument_name()`),
+  except that Argyll's "X-Rite i1 DisplayPro, ColorMunki Display", the one
+  instrument it lists under both names it's sold as, is shown as
+  "i1Display Pro or ColorMunki Display". Commas aren't replaced in general,
+  as some names have one ("Q, Inc Prisma").
 - `Job::start` runs a tool under `stdbuf -o0 -e0` with piped stdin, stdout
   and stderr, and turns its output into events: lines (split on `\r` and
   `\n`), `patch N of M` progress, and prompts (`Event::Prompt`, with the

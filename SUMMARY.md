@@ -13,6 +13,9 @@
   than stopping the app. Saves write a `.tmp` file, fsync it and rename it
   into place. (`craft-settings` would fit, but it isn't in the pinned
   craft-libs revision.)
+- `src/verify.rs`: the verification patch set, `colverify` parsing,
+  scoring and the text report.
+- `src/corrections.rs`: finding and labelling `.ccss`/`.ccmx` files.
 - `src/theme.rs`: LightCraft's four themes (Charcoal, Midnight, Silver,
   Paper), Inter fonts, and egui styling through
   `craft_ui::theme::WidgetPalette`.
@@ -67,6 +70,43 @@ result shows dispcal's final error summary lines; "Install profile" runs
 `dispwin -d D -I base.icc`, which with the Wayland ArgyllCMS installs it via
 ucmm and points KWin at the installed copy.
 
+## Corrections
+
+`corrections::find()` searches `$XDG_DATA_HOME/ArgyllCMS`, DisplayCAL's
+`$XDG_DATA_HOME/DisplayCAL/dl` (and its per-instrument subdirectories), each
+`$XDG_DATA_DIRS/ArgyllCMS` and `/usr/share/color/argyll/ref`, keeping the
+first file of each name. Labels come from the CGATS header: `TECHNOLOGY`, and
+`DISPLAY`, or `DESCRIPTOR` unless it's "Not specified" (the key match needs a
+following space, so `DISPLAY_TYPE_REFRESH` isn't taken for `DISPLAY`). The
+choice is saved as `correction` in settings. `App::instrument_args()` passes
+it as `-X`, in place of the display type's `-y`, to both dispcal and
+dispread.
+
+## Verification
+
+1. 57 patches: a 21 step grayscale, primaries and secondaries at 100% and
+   50%, and the 24 ColorChecker colors (BabelColor sRGB averages).
+2. `fakeread profile.icc <base>-expected` predicts them (run directly: it
+   takes a fraction of a second).
+3. `dispread` measures them as a job, with `-k profile.cal` when the
+   calibration file sits next to the profile, so the measurement goes
+   through the calibration the profile assumes.
+4. `colverify -v 2 -N -k expected.ti3 measured.ti3`: `-N` normalises each
+   file to its own white, so a backlight change since calibrating doesn't
+   count as error; `-k` gives CIEDE2000. The per patch lines
+   (`N: L a b <=> L a b  de X`) are parsed and summarised here, rather than
+   taking colverify's totals.
+5. Verdict: Good when the average is at most 1.0 and the maximum at most 3.0,
+   Acceptable at 2.0 and 5.0, otherwise Poor. Grayscale figures are patches
+   1-21.
+6. Files go to `$XDG_DATA_HOME/displaycraft/verify/<profile>-verify-<stamp>`
+   (`-expected.ti1/.ti3`, `-measured.ti1/.ti3`, `.txt` report).
+
+Checking the approach: a profile whose own prediction bends from its white
+point target near full drive (white at x 0.3087 against grays at 0.335)
+verified at average 11.6, while a consistent one verified at 1.9 whether the
+backlight was at 70% or 95%.
+
 ## Verified
 
 - Builds with Rust 1.99; unit tests cover the usage parser, progress and
@@ -87,4 +127,11 @@ ucmm and points KWin at the installed copy.
   283 s, white point error 0.33 dE, average neutral error 0.39 dE, and KWin
   switched to the installed copy in ICC mode.
 
-Not yet tested by hand: the Preferences dialog (opening, Browse, Apply).
+- `app::hardware_verify_tests::verify_profile_through_ui` (ignored by
+  default; `DISPLAYCRAFT_TEST_PROFILE` picks the profile) drives the Verify
+  page. For the 18:29 low quality matrix profile: average 1.89, maximum 7.96
+  (saturated ColorChecker patches), grayscale 0.72/1.60, in 58 s; a manual
+  run of the same pipeline gave 1.90/7.92.
+
+Not yet tested by hand: the Preferences dialog (opening, Browse, Apply), and
+the correction list and Browse on the Instrument page.

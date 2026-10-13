@@ -1,7 +1,9 @@
 mod app;
 mod argyll;
+mod corrections;
 mod settings;
 mod theme;
+mod verify;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

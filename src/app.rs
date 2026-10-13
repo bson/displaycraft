@@ -7,7 +7,9 @@ use std::sync::mpsc::Receiver;
 use egui::{Align, Layout, RichText, ScrollArea};
 
 use crate::argyll::{self, Event, Inventory, Job};
+use crate::corrections::{self, Correction};
 use crate::settings::Settings;
+use crate::verify;
 use crate::theme::{self, ThemeKind, Tokens};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -16,10 +18,11 @@ enum Step {
     Instrument,
     Targets,
     Run,
+    Verify,
 }
 
 impl Step {
-    const ALL: [Step; 4] = [Step::Display, Step::Instrument, Step::Targets, Step::Run];
+    const ALL: [Step; 5] = [Step::Display, Step::Instrument, Step::Targets, Step::Run, Step::Verify];
 
     fn label(self) -> &'static str {
         match self {
@@ -27,6 +30,7 @@ impl Step {
             Step::Instrument => "Instrument",
             Step::Targets => "Targets",
             Step::Run => "Calibrate & profile",
+            Step::Verify => "Verify",
         }
     }
 }
@@ -88,6 +92,33 @@ impl Default for Targets {
 enum JobKind {
     Calibrate,
     Install,
+    Verify,
+}
+
+impl JobKind {
+    /// The page that shows this job
+    fn step(self) -> Step {
+        match self {
+            JobKind::Calibrate | JobKind::Install => Step::Run,
+            JobKind::Verify => Step::Verify,
+        }
+    }
+}
+
+/// A verification in progress: where its files go.
+struct VerifyRun {
+    profile: PathBuf,
+    /// Base name for the files, e.g. ".../verify/eDP-1-...-verify-20261012-190000"
+    base: PathBuf,
+    correction: Option<PathBuf>,
+}
+
+/// A finished verification.
+struct VerifyOutcome {
+    profile: PathBuf,
+    summary: verify::Summary,
+    results: Vec<verify::PatchResult>,
+    report: PathBuf,
 }
 
 /// What the last calibration produced.
@@ -159,6 +190,13 @@ pub struct App {
     status: Option<(bool, String)>,
     pending: Option<(PathBuf, PathBuf)>,
     outcome: Option<Outcome>,
+    corrections: Vec<Correction>,
+    /// A file chosen with Browse, picked on its own thread
+    correction_picker: Option<Receiver<Option<PathBuf>>>,
+    verify_profile: Option<PathBuf>,
+    verify_picker: Option<Receiver<Option<PathBuf>>>,
+    verify_run: Option<VerifyRun>,
+    verify_outcome: Option<VerifyOutcome>,
 }
 
 impl App {
@@ -190,8 +228,15 @@ impl App {
             status: None,
             pending: None,
             outcome: None,
+            corrections: corrections::find(),
+            correction_picker: None,
+            verify_profile: None,
+            verify_picker: None,
+            verify_run: None,
+            verify_outcome: None,
         };
         app.refresh_inventory();
+        app.verify_profile = app.saved_profiles().into_iter().next();
         app
     }
 
@@ -250,12 +295,9 @@ impl App {
             }
         };
         let display = &self.inventory.displays[self.display];
-        let instrument = &self.inventory.instruments[self.instrument];
         let t = &self.targets;
-        let mut args: Vec<String> = vec!["-v".into(), "-d".into(), display.value.clone(), "-c".into(), instrument.value.clone()];
-        if let Some(dt) = self.display_type.and_then(|i| self.inventory.display_types.get(i)) {
-            args.extend(["-y".into(), dt.value.clone()]);
-        }
+        let mut args: Vec<String> = vec!["-v".into(), "-d".into(), display.value.clone()];
+        args.extend(self.instrument_args());
         // Skip the interactive monitor-controls adjustment
         args.push("-m".into());
         args.extend(["-q".into(), t.quality.arg().into()]);
@@ -277,6 +319,107 @@ impl App {
         self.start_job(ctx, JobKind::Calibrate, &bin, "dispcal", &args);
         self.pending = Some((base.with_extension("cal"), icc));
         self.outcome = None;
+    }
+
+    /// The instrument and its correction: a correction file replaces the
+    /// display type, which selects one of the instrument's built-in ones.
+    fn instrument_args(&self) -> Vec<String> {
+        let mut args = vec!["-c".to_string(), self.inventory.instruments[self.instrument].value.clone()];
+        if let Some(c) = &self.settings.correction {
+            args.extend(["-X".into(), c.display().to_string()]);
+        } else if let Some(dt) = self.display_type.and_then(|i| self.inventory.display_types.get(i)) {
+            args.extend(["-y".into(), dt.value.clone()]);
+        }
+        args
+    }
+
+    fn data_dir() -> std::io::Result<PathBuf> {
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .ok_or_else(|| std::io::Error::other("no HOME"))?;
+        Ok(data.join("displaycraft"))
+    }
+
+    /// Profiles DisplayCraft made, newest first.
+    fn saved_profiles(&self) -> Vec<PathBuf> {
+        let Ok(dir) = Self::data_dir() else { return Vec::new() };
+        let mut found: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
+            .map(|it| {
+                it.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.extension().is_some_and(|x| x == "icc"))
+                    .filter_map(|p| Some((p.metadata().ok()?.modified().ok()?, p)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.into_iter().map(|(_, p)| p).collect()
+    }
+
+    fn start_verification(&mut self, ctx: &egui::Context) {
+        let (Some(bin), Some(profile)) = (self.bin.clone(), self.verify_profile.clone()) else { return };
+        let fail = |app: &mut App, why: String| app.status = Some((false, why));
+        let dir = match Self::data_dir().map(|d| d.join("verify")) {
+            Ok(d) => d,
+            Err(e) => return fail(self, format!("No place for the results: {e}")),
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return fail(self, format!("Can't create {}: {e}", dir.display()));
+        }
+        let stem = profile.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "profile".into());
+        let base = dir.join(format!("{stem}-verify-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+        let expected = base.with_file_name(format!("{}-expected", base.file_name().unwrap().to_string_lossy()));
+        let measured = base.with_file_name(format!("{}-measured", base.file_name().unwrap().to_string_lossy()));
+        let patches = verify::patches();
+        for f in [&expected, &measured] {
+            if let Err(e) = verify::write_ti1(&f.with_extension("ti1"), &patches) {
+                return fail(self, format!("Can't write the patch set: {e}"));
+            }
+        }
+        // The profile's prediction for each patch (quick, so not a job)
+        let out = std::process::Command::new(bin.join("fakeread")).arg(&profile).arg(&expected).output();
+        match out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => return fail(self, format!("fakeread failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
+            Err(e) => return fail(self, format!("Can't run fakeread: {e}")),
+        }
+
+        let display = &self.inventory.displays[self.display];
+        let mut args: Vec<String> = vec!["-v".into(), "-d".into(), display.value.clone()];
+        args.extend(self.instrument_args());
+        // Measure through the profile's calibration, as the profile assumes
+        let cal = profile.with_extension("cal");
+        if cal.is_file() {
+            args.extend(["-k".into(), cal.display().to_string()]);
+        }
+        args.push(measured.display().to_string());
+        self.start_job(ctx, JobKind::Verify, &bin, "dispread", &args);
+        self.verify_run = Some(VerifyRun { profile, base, correction: self.settings.correction.clone() });
+        self.verify_outcome = None;
+    }
+
+    /// Compare prediction and measurement once dispread has finished.
+    fn finish_verification(&mut self, run: VerifyRun) -> Result<VerifyOutcome, String> {
+        let bin = self.bin.clone().ok_or("ArgyllCMS wasn't found")?;
+        let name = run.base.file_name().unwrap().to_string_lossy().into_owned();
+        let expected = run.base.with_file_name(format!("{name}-expected.ti3"));
+        let measured = run.base.with_file_name(format!("{name}-measured.ti3"));
+        // -N: each reading relative to its own white, so a changed backlight
+        // setting isn't counted as error; -k: CIEDE2000
+        let out = std::process::Command::new(bin.join("colverify"))
+            .args(["-v", "2", "-N", "-k"])
+            .arg(&expected)
+            .arg(&measured)
+            .output()
+            .map_err(|e| format!("Can't run colverify: {e}"))?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        let results = verify::parse_colverify(&text);
+        let summary = verify::summarize(&results, |i| i <= 21).ok_or("colverify gave no results")?;
+        let report = run.base.with_extension("txt");
+        let text = verify::report(&run.profile, &summary, &verify::patches(), &results, run.correction.as_deref());
+        std::fs::write(&report, text).map_err(|e| format!("Can't write the report: {e}"))?;
+        Ok(VerifyOutcome { profile: run.profile, summary, results, report })
     }
 
     fn install_profile(&mut self, ctx: &egui::Context) {
@@ -337,6 +480,19 @@ impl App {
                     self.status = Some((true, "Calibration and profile done".into()));
                 } else {
                     self.status = Some((false, "Calibration didn't finish. See the log.".into()));
+                }
+            }
+            JobKind::Verify => {
+                let run = self.verify_run.take();
+                match (ok, run) {
+                    (true, Some(run)) => match self.finish_verification(run) {
+                        Ok(outcome) => {
+                            self.status = Some((true, format!("Verified: {}", outcome.summary.verdict.label())));
+                            self.verify_outcome = Some(outcome);
+                        }
+                        Err(why) => self.status = Some((false, why)),
+                    },
+                    _ => self.status = Some((false, "Verification didn't finish. See the log.".into())),
                 }
             }
             JobKind::Install => {
@@ -499,7 +655,8 @@ impl App {
             let text = RichText::new(format!("{}  {}", i + 1, step.label())).color(if selected { t.text } else { t.text_label });
             let button = egui::Button::new(text).selected(selected).min_size(egui::vec2(ui.available_width(), 30.0));
             // Settings can't change under a running calibration
-            if ui.add_enabled(!running || step == Step::Run, button).clicked() {
+            let job_step = self.job.as_ref().map(|(kind, _)| kind.step());
+            if ui.add_enabled(!running || Some(step) == job_step, button).clicked() {
                 self.step = step;
             }
         }
@@ -541,15 +698,80 @@ impl App {
         if ui.button("Refresh").clicked() {
             self.refresh_inventory();
         }
+        self.corrections_section(ui);
         if !self.inventory.display_types.is_empty() {
             ui.add_space(12.0);
             ui.label(RichText::new("Display type").font(t.semibold(13.0)).color(t.text));
-            ui.label(RichText::new("Matches the instrument's correction to the display's backlight.").color(t.text_dim));
-            ui.radio_value(&mut self.display_type, None, "Instrument default");
-            for (i, dt) in self.inventory.display_types.iter().enumerate() {
-                ui.radio_value(&mut self.display_type, Some(i), format!("{} ({})", dt.description, dt.value));
+            let corrected = self.settings.correction.is_some();
+            ui.label(RichText::new(if corrected {
+                "Not used: the correction file above takes its place."
+            } else {
+                "Matches the instrument's correction to the display's backlight."
+            })
+            .color(t.text_dim));
+            ui.add_enabled_ui(!corrected, |ui| {
+                ui.radio_value(&mut self.display_type, None, "Instrument default");
+                for (i, dt) in self.inventory.display_types.iter().enumerate() {
+                    ui.radio_value(&mut self.display_type, Some(i), format!("{} ({})", dt.description, dt.value));
+                }
+            });
+        }
+    }
+
+    fn corrections_section(&mut self, ui: &mut egui::Ui) {
+        let t = Tokens::get(ui.ctx());
+        if let Some(rx) = &self.correction_picker {
+            if let Ok(picked) = rx.try_recv() {
+                self.correction_picker = None;
+                if let Some(path) = picked {
+                    match corrections::read(&path) {
+                        Some(c) => {
+                            if !self.corrections.iter().any(|k| k.path == c.path) {
+                                self.corrections.insert(0, c);
+                            }
+                            self.set_correction(Some(path));
+                        }
+                        None => self.status = Some((false, format!("{} isn't a .ccss or .ccmx file", path.display()))),
+                    }
+                }
             }
         }
+        ui.add_space(12.0);
+        ui.label(RichText::new("Correction").font(t.semibold(13.0)).color(t.text));
+        ui.label(RichText::new("A spectral correction (.ccss) or matrix (.ccmx) for this display's backlight.").color(t.text_dim));
+        let mut chosen = self.settings.correction.clone();
+        ui.radio_value(&mut chosen, None, "None (use the display type below)");
+        for c in &self.corrections {
+            ui.radio_value(&mut chosen, Some(c.path.clone()), c.label())
+                .on_hover_text(c.path.display().to_string());
+        }
+        // A saved choice that's no longer in the usual places
+        if let Some(path) = chosen.as_ref().filter(|p| !self.corrections.iter().any(|c| &c.path == *p)) {
+            // Only shows the choice; picking another one changes it
+            let _ = ui.radio(true, path.display().to_string());
+        }
+        let browsing = self.correction_picker.is_some();
+        if ui.add_enabled(!browsing, egui::Button::new("Browse…")).clicked() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let picked = rfd::FileDialog::new()
+                    .set_title("Colorimeter correction")
+                    .add_filter("Corrections", &["ccss", "ccmx"])
+                    .pick_file();
+                let _ = tx.send(picked);
+                ctx.request_repaint();
+            });
+            self.correction_picker = Some(rx);
+        }
+        if chosen != self.settings.correction {
+            self.set_correction(chosen);
+        }
+    }
+
+    fn set_correction(&mut self, path: Option<PathBuf>) {
+        self.settings.correction = path;
+        self.save_settings();
     }
 
     fn page_targets(&mut self, ui: &mut egui::Ui) {
@@ -627,15 +849,7 @@ impl App {
         });
 
         if running {
-            ui.add_space(6.0);
-            match self.progress {
-                Some((n, m)) if m > 0 => {
-                    ui.add(egui::ProgressBar::new(n as f32 / m as f32).text(format!("Patch {n} of {m}")));
-                }
-                _ => {
-                    ui.add(egui::ProgressBar::new(0.0).animate(true).text("Working"));
-                }
-            }
+            self.progress_bar(ui);
         }
 
         if let Some(outcome) = &self.outcome {
@@ -657,13 +871,185 @@ impl App {
 
         ui.add_space(10.0);
         ui.label(RichText::new("Log").color(t.text_dim));
+        self.log_view(ui, f32::INFINITY);
+    }
+
+    fn progress_bar(&self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        match self.progress {
+            Some((n, m)) if m > 0 => {
+                ui.add(egui::ProgressBar::new(n as f32 / m as f32).text(format!("Patch {n} of {m}")));
+            }
+            _ => {
+                ui.add(egui::ProgressBar::new(0.0).animate(true).text("Working"));
+            }
+        }
+    }
+
+    fn log_view(&self, ui: &mut egui::Ui, max_height: f32) {
+        let t = Tokens::get(ui.ctx());
         egui::Frame::new().fill(t.field).corner_radius(4).inner_margin(6).show(ui, |ui| {
-            ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
+            ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).max_height(max_height).show(ui, |ui| {
                 for line in &self.log {
                     ui.label(RichText::new(line).monospace().size(11.5));
                 }
             });
         });
+    }
+
+    fn page_verify(&mut self, ui: &mut egui::Ui) {
+        let t = Tokens::get(ui.ctx());
+        if let Some(rx) = &self.verify_picker {
+            if let Ok(picked) = rx.try_recv() {
+                self.verify_picker = None;
+                if picked.is_some() {
+                    self.verify_profile = picked;
+                }
+            }
+        }
+        let running = self.job.is_some();
+        ui.heading("Verify");
+        ui.label("Measures 57 patches through a profile's calibration and compares them with what the profile predicts.");
+        ui.add_space(6.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Profile");
+            let label = self
+                .verify_profile
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Choose a profile".into());
+            ui.add_enabled_ui(!running, |ui| {
+                egui::ComboBox::from_id_salt("verify-profile").width(320.0).selected_text(label).show_ui(ui, |ui| {
+                    for p in self.saved_profiles() {
+                        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        ui.selectable_value(&mut self.verify_profile, Some(p), name);
+                    }
+                });
+                if ui.add_enabled(self.verify_picker.is_none(), egui::Button::new("Browse…")).clicked() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let picked = rfd::FileDialog::new().set_title("Profile to verify").add_filter("ICC profiles", &["icc", "icm"]).pick_file();
+                        let _ = tx.send(picked);
+                        ctx.request_repaint();
+                    });
+                    self.verify_picker = Some(rx);
+                }
+            });
+        });
+        if let Some(p) = &self.verify_profile {
+            if !p.with_extension("cal").is_file() {
+                ui.label(RichText::new("No calibration file next to this profile, so it's measured with the calibration currently loaded.").color(t.caution));
+            }
+        }
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            match self.ready() {
+                Ok(()) if !running => {
+                    let can = self.verify_profile.is_some();
+                    if ui.add_enabled(can, egui::Button::new(RichText::new("Start").font(t.semibold(13.0)))).clicked() {
+                        let ctx = ui.ctx().clone();
+                        self.start_verification(&ctx);
+                    }
+                }
+                Ok(()) => {
+                    if ui.button("Cancel").clicked() {
+                        if let Some((_, job)) = self.job.as_mut() {
+                            job.cancel();
+                        }
+                    }
+                }
+                Err(why) => {
+                    ui.add_enabled(false, egui::Button::new("Start"));
+                    ui.label(RichText::new(why).color(t.caution));
+                }
+            }
+            if let Some((ok, text)) = &self.status {
+                ui.label(RichText::new(text).color(if *ok { t.good } else { t.bad }));
+            }
+        });
+        if running {
+            self.progress_bar(ui);
+        }
+
+        if let Some(o) = &self.verify_outcome {
+            let s = &o.summary;
+            let color = match s.verdict {
+                verify::Verdict::Good => t.good,
+                verify::Verdict::Acceptable => t.caution,
+                verify::Verdict::Poor => t.bad,
+            };
+            ui.add_space(10.0);
+            egui::Frame::new().fill(t.inset).corner_radius(4).inner_margin(10).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(s.verdict.label()).font(t.semibold(18.0)).color(color));
+                    ui.label(RichText::new(o.profile.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).color(t.text_dim));
+                });
+                egui::Grid::new("verify-summary").num_columns(4).spacing([18.0, 4.0]).show(ui, |ui| {
+                    ui.label("Average ΔE00");
+                    ui.label(RichText::new(format!("{:.2}", s.average)).color(t.text));
+                    ui.label("Maximum ΔE00");
+                    ui.label(RichText::new(format!("{:.2}", s.maximum)).color(t.text));
+                    ui.end_row();
+                    ui.label("Grayscale average");
+                    ui.label(RichText::new(format!("{:.2}", s.gray_average)).color(t.text));
+                    ui.label("Grayscale maximum");
+                    ui.label(RichText::new(format!("{:.2}", s.gray_maximum)).color(t.text));
+                    ui.end_row();
+                    ui.label("Best 90% average");
+                    ui.label(RichText::new(format!("{:.2}", s.best90_average)).color(t.text));
+                    ui.end_row();
+                });
+                ui.label(
+                    RichText::new(format!(
+                        "Good: average ≤ {} and maximum ≤ {}. Acceptable: ≤ {} and ≤ {}.",
+                        verify::GOOD.0, verify::GOOD.1, verify::ACCEPTABLE.0, verify::ACCEPTABLE.1
+                    ))
+                    .small()
+                    .color(t.text_dim),
+                );
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Report: {}", o.report.display())).small().color(t.text_dim));
+                    if ui.small_button("Open").clicked() {
+                        let _ = std::process::Command::new("xdg-open").arg(&o.report).spawn();
+                    }
+                });
+            });
+
+            ui.add_space(6.0);
+            let patches = verify::patches();
+            ScrollArea::vertical().id_salt("verify-patches").max_height(240.0).show(ui, |ui| {
+                egui::Grid::new("verify-table").num_columns(4).striped(true).spacing([10.0, 3.0]).show(ui, |ui| {
+                    ui.label("");
+                    ui.label(RichText::new("Patch").color(t.text_dim));
+                    ui.label(RichText::new("ΔE00").color(t.text_dim));
+                    ui.label("");
+                    ui.end_row();
+                    for r in &o.results {
+                        let Some(p) = patches.get(r.index - 1) else { continue };
+                        let [cr, cg, cb] = verify::swatch(p);
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 14.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 2, egui::Color32::from_rgb(cr, cg, cb));
+                        ui.label(&p.name);
+                        let c = if r.de <= verify::GOOD.1 { t.good } else if r.de <= verify::ACCEPTABLE.1 { t.caution } else { t.bad };
+                        ui.label(RichText::new(format!("{:.2}", r.de)).color(c));
+                        // A bar scaled so 10 fills it
+                        let (bar, _) = ui.allocate_exact_size(egui::vec2(120.0, 8.0), egui::Sense::hover());
+                        ui.painter().rect_filled(bar, 2, t.field);
+                        let mut fill = bar;
+                        fill.set_width((bar.width() * (r.de / 10.0).min(1.0) as f32).max(1.0));
+                        ui.painter().rect_filled(fill, 2, c);
+                        ui.end_row();
+                    }
+                });
+            });
+        }
+
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new("Log").default_open(running).show(ui, |ui| self.log_view(ui, 180.0));
     }
 
     fn prompt_dialog(&mut self, ctx: &egui::Context) {
@@ -738,6 +1124,7 @@ impl eframe::App for App {
                 }
                 Step::Targets => self.page_targets(ui),
                 Step::Run => self.page_run(ui),
+                Step::Verify => self.page_verify(ui),
             }
         });
         self.preferences(&ctx);
@@ -764,7 +1151,7 @@ mod hardware_tests {
 
     /// Step the UI until no tool is running, answering Argyll's prompts the
     /// way a user would.
-    fn run_until_idle(harness: &mut Harness<'_, App>, limit: Duration) {
+    pub(super) fn run_until_idle(harness: &mut Harness<'_, App>, limit: Duration) {
         let deadline = Instant::now() + limit;
         loop {
             harness.step();
@@ -809,6 +1196,48 @@ mod hardware_tests {
         let app = harness.state();
         assert!(app.outcome.as_ref().is_some_and(|o| o.installed), "install failed; log:\n{}", app.log.join("\n"));
         println!("installed {}", app.outcome.as_ref().unwrap().icc.display());
+    }
+}
+
+#[cfg(test)]
+mod hardware_verify_tests {
+    use std::time::Duration;
+
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+
+    /// Verifies a profile through the Verify page with the real ArgyllCMS
+    /// and instrument. Uses $DISPLAYCRAFT_TEST_PROFILE if set, else the
+    /// newest saved profile. Measures only; changes no display settings.
+    #[test]
+    #[ignore = "needs ArgyllCMS, an instrument on the screen, and a saved profile"]
+    fn verify_profile_through_ui() {
+        let mut harness = Harness::builder().with_size(egui::vec2(980.0, 640.0)).build_eframe(|cc| App::new(cc));
+        harness.run_steps(2);
+        if let Some(p) = std::env::var_os("DISPLAYCRAFT_TEST_PROFILE") {
+            harness.state_mut().verify_profile = Some(PathBuf::from(p));
+        }
+        let profile = harness.state().verify_profile.clone().expect("a saved profile");
+        println!("verifying {}", profile.display());
+
+        harness.get_by_label_contains("Verify").click();
+        harness.run_steps(2);
+        harness.get_by_label("Start").click();
+        harness.step();
+        assert!(harness.state().job.is_some(), "Start didn't launch dispread: {:?}", harness.state().status);
+        super::hardware_tests::run_until_idle(&mut harness, Duration::from_secs(900));
+
+        let app = harness.state();
+        let o = app.verify_outcome.as_ref().unwrap_or_else(|| panic!("no result: {:?}; log:\n{}", app.status, app.log.join("\n")));
+        let s = &o.summary;
+        println!(
+            "{}: average {:.2}, maximum {:.2}, grayscale {:.2}/{:.2}, best 90% {:.2}\nreport {}",
+            s.verdict.label(), s.average, s.maximum, s.gray_average, s.gray_maximum, s.best90_average, o.report.display()
+        );
+        assert_eq!(o.results.len(), verify::patches().len());
+        assert!(o.report.is_file());
     }
 }
 

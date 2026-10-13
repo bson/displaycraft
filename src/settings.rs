@@ -13,6 +13,9 @@ pub struct Settings {
     pub argyll_bin: Option<PathBuf>,
     /// Theme label, e.g. "Charcoal".
     pub theme: Option<String>,
+    /// Colorimeter correction (.ccss/.ccmx) passed with -X. None means use
+    /// the display type instead.
+    pub correction: Option<PathBuf>,
 }
 
 fn path() -> Option<PathBuf> {
@@ -55,7 +58,11 @@ mod tests {
 
     #[test]
     fn round_trips_and_tolerates_unknown_or_missing_fields() {
-        let s = Settings { argyll_bin: Some("/opt/argyll-kde-wayland/bin".into()), theme: Some("Paper".into()) };
+        let s = Settings {
+            argyll_bin: Some("/opt/argyll-kde-wayland/bin".into()),
+            theme: Some("Paper".into()),
+            correction: Some("/usr/local/share/ArgyllCMS/WLEDFamily_07Feb11.ccss".into()),
+        };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
         assert_eq!(toml::from_str::<Settings>("").unwrap(), Settings::default());

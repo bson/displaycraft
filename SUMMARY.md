@@ -46,7 +46,8 @@
   hyperlinks need a browser feature eframe isn't built with. The report
   pages' Open buttons use it too. Preferences and About are
   `Step::always_open()`: reachable, and free of ArgyllCMS warnings, where
-  ArgyllCMS can't run.
+  ArgyllCMS can't run. During a run their sidebar buttons are disabled,
+  like the steps other than the running one's.
 - Preferences is a page (`Step::Preferences`, `page_preferences()`), its
   button at the foot of the sidebar, with About under it, above the ArgyllCMS version (no path:
   the AppImage's mount point changes every run, and Preferences shows the
@@ -171,7 +172,11 @@ new scan replaces a running one, whose result is dropped.
   instrument it lists under both names it's sold as, is shown as
   "i1Display Pro or ColorMunki Display". Commas aren't replaced in general,
   as some names have one ("Q, Inc Prisma").
-- `Job::start` runs a tool under `stdbuf -o0 -e0` with piped stdin, stdout
+- `Job::start` runs a tool with its output unbuffered
+  (`System::live_output()`: on Linux under `stdbuf -o0 -e0`, which an
+  ArgyllCMS other than the bundled one needs; elsewhere directly, as the
+  bundled ArgyllCMS unbuffers its stdout itself when it isn't a terminal,
+  and macOS and Windows have no stdbuf), with piped stdin, stdout
   and stderr, and turns its output into events: lines (split on `\r` and
   `\n`), `patch N of M` progress, and prompts (`Event::Prompt`, with the
   last four lines printed before it, which say what went wrong). Most

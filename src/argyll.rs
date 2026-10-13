@@ -77,10 +77,13 @@ pub fn set_window_system(ws: Option<WindowSystem>) {
     *WINDOW_SYSTEM.lock().unwrap() = ws;
 }
 
-/// An ArgyllCMS program (or a wrapper that runs one), told which display
-/// system to use
+/// An ArgyllCMS program, told which display system to use
 fn command(program: impl AsRef<OsStr>) -> Command {
-    let mut cmd = Command::new(program);
+    told(Command::new(program))
+}
+
+/// `cmd`, which runs an ArgyllCMS program, told which display system to use
+fn told(mut cmd: Command) -> Command {
     if let Some(ws) = *WINDOW_SYSTEM.lock().unwrap() {
         cmd.env("ARGYLL_WINDOW_SYSTEM", ws.name());
     }
@@ -363,12 +366,9 @@ impl Job {
     /// Start `tool` from `bin` with `args`. `wake` is called after each
     /// event, so the UI can repaint.
     pub fn start(bin: &Path, tool: &str, args: &[String], wake: impl Fn() + Send + Sync + 'static) -> std::io::Result<Job> {
-        // stdbuf, so progress and prompts arrive as they're printed
-        // rather than when a pipe buffer fills.
-        let mut child = command("stdbuf")
-            .arg("-o0")
-            .arg("-e0")
-            .arg(bin.join(tool))
+        // So progress and prompts arrive as they're printed rather than
+        // when a pipe buffer fills (see System::live_output)
+        let mut child = told(crate::system::current().live_output(&bin.join(tool)))
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

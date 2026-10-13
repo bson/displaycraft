@@ -4,7 +4,7 @@
 //! `current()` returns it.
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::argyll::WindowSystem;
@@ -32,6 +32,14 @@ pub trait System: Sync {
     /// Open a file or URL with the desktop's default application, without
     /// waiting for it
     fn open(&self, target: &OsStr);
+
+    /// A command running `program` with its output unbuffered, so that
+    /// progress and prompts (which don't end with a newline) can be read as
+    /// they're printed. The bundled ArgyllCMS makes its output unbuffered
+    /// itself when it isn't a terminal.
+    fn live_output(&self, program: &Path) -> Command {
+        Command::new(program)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -63,6 +71,14 @@ impl System for Linux {
 
     fn open(&self, target: &OsStr) {
         let _ = Command::new("xdg-open").arg(target).spawn();
+    }
+
+    /// Through stdbuf, which an ArgyllCMS other than the bundled one needs,
+    /// and which does no harm with the bundled one
+    fn live_output(&self, program: &Path) -> Command {
+        let mut cmd = Command::new("stdbuf");
+        cmd.arg("-o0").arg("-e0").arg(program);
+        cmd
     }
 }
 

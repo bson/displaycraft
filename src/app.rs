@@ -1203,12 +1203,15 @@ impl App {
                 ui.label(RichText::new(format!("ArgyllCMS {}", self.inventory.version)).small().color(t.text_dim));
             }
             ui.add_space(8.0);
-            // Bottom up: About ends up below Preferences
+            // Bottom up: About ends up below Preferences. Like the steps,
+            // they can't be opened during a run, which would leave the page
+            // showing its progress, prompts and Cancel.
+            let idle = self.job.is_none();
             for step in [Step::About, Step::Preferences] {
                 let selected = self.step == step;
                 let text = RichText::new(step.label()).color(if selected { t.text } else { t.text_label });
                 let button = egui::Button::new(text).selected(selected).min_size(egui::vec2(ui.available_width(), 30.0));
-                if ui.add(button).clicked() {
+                if ui.add_enabled(idle, button).clicked() {
                     self.step = step;
                 }
             }

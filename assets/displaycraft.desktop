@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=DisplayCraft
+GenericName=Display Calibration
+Comment=Calibrate and profile displays with ArgyllCMS
+Exec=displaycraft
+Icon=displaycraft
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=color;colour;calibration;profile;ICC;monitor;colorimeter;
+StartupWMClass=displaycraft

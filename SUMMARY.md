@@ -4,8 +4,9 @@
 
 - `src/main.rs`: eframe window setup (wgpu, Wayland, title `DisplayCraft`,
   app id `displaycraft`).
-- `src/app.rs`: the workflow UI. A step sidebar (Display, Instrument,
-  Spectro, Settings, Measure, Verify) and a page per step. Internally the
+- `src/app.rs`: the workflow UI. A step sidebar (numbered Display,
+  Spectro, Settings, Measure, Verify, then Report and Profiles below a
+  separator) and a page per step. Internally the
   steps keep their older names (`Step::Instrument`, `Step::Targets`,
   `Step::Run`). Pages put one and a half text rows (`App::gap()`) after the
   heading, the description and the choices. The top bar shows
@@ -24,21 +25,36 @@
 - `src/verify.rs`: the verification patch set, `colverify` parsing,
   scoring, the text report and CSV export.
 - `src/corrections.rs`: finding and labelling `.ccss`/`.ccmx` files.
+- `src/report.rs`: the display report's patch set, `.ti3` reading and the
+  arithmetic (gamma fit, CCT, u'v' gamut coverage).
+- `src/profiles.rs`: reading ICC profiles (description, date, white point),
+  listing them, the last verification verdict, and KWin's state for an
+  output from `kscreen-doctor -o`.
 - `src/session.rs`: when the window can't open at all (no Wayland), prints
   the reason and tries `kdialog`, then `zenity`.
 - `src/theme.rs`: LightCraft's four themes (Charcoal, Midnight, Silver,
   Paper), Inter fonts, and egui styling through
   `craft_ui::theme::WidgetPalette`.
 
-## Logo
+## Logo, icon and installing
 
-`assets/displaycraft.png` (1254x1254, opaque dark background) is the source,
-kept for the program icon. The UI embeds `assets/displaycraft-256.png`, made
-from it with `magick displaycraft.png -resize 256x256 -strip`, through
+`assets/displaycraft.png` (1254x1254, opaque dark background) is the source.
+`assets/icons/hicolor/<n>x<n>/apps/displaycraft.png` (16 to 512) are made
+from it with `magick displaycraft.png -resize <n>x<n> -strip`; regenerate
+them when the source changes. The UI embeds the 256 one through
 `egui::include_image!` and `egui_extras`'s image loaders (`app::logo()`,
 drawn with rounded corners): above the step ladder (once per window, so not
-again on the pages), and in the Preferences dialog.
-Regenerate the 256 copy when the source changes.
+again on the pages), and in the Preferences dialog. `main.rs` also sets it
+as the window icon, which matters only when not installed: on Wayland the
+compositor takes the icon from the desktop entry matching the app id
+(`displaycraft`).
+
+`install.sh` builds a release binary and installs it, the icons and
+`assets/displaycraft.desktop` under `PREFIX` (default `~/.local`), with an
+absolute `Exec` because the desktop session's `PATH` may lack
+`$PREFIX/bin`, then runs `update-desktop-database` and `kbuildsycoca6`.
+`--uninstall` removes them. (`gtk-update-icon-cache` is left out: KDE doesn't
+use it, and other applications' icons in the user's folder made it fail.)
 
 ## Dependencies
 
@@ -62,7 +78,10 @@ and the page shows ArgyllCMS's reasons, with Check again and Preferences, so
 another ArgyllCMS can still be chosen. Unknown (no `platform` line, i.e. a
 dispwin without `-Q`, so not the Wayland build): a warning, and the rest
 works. Identification takes about 4 s, mostly `dispcal -?` probing USB and
-serial ports for instruments, and runs before the window appears.
+serial ports for instruments, so it runs on a thread (`App::scan`, taken up
+by `poll_scan()` in `logic()`): the window opens at once, Display and
+Spectro show a spinner, Refresh is disabled and Start explains the wait. A
+new scan replaces a running one, whose result is dropped.
 
 ## Running ArgyllCMS
 
@@ -183,6 +202,42 @@ sRGB mode and applies calibration curves to the patches itself. A D55
 profile made with that verified Good: average 0.71, maximum 1.96. Profiles
 made before then should be remade.
 
+## Report
+
+`dispread` measures 16 patches (`report::PATCHES`): black three times
+(start, and twice at the end; the median is used, as it sets the contrast
+ratio), white, grays 10-90% and the three primaries. "Uncalibrated" passes
+`-k` with a linear `.cal` (`reports/linear.cal`); "As calibrated now" uses
+whatever calibration is in effect. dispread's XYZ is scaled to white
+Y = 100, so values are made absolute with `LUMINANCE_XYZ_CDM2`. Gamma is a
+least-squares power law through the origin over the grays, black removed.
+The primaries' chromaticities have black's XYZ subtracted first. Coverage
+of sRGB, Display P3 and Adobe RGB is by area in CIE 1976 u'v'
+(Sutherland-Hodgman clipping of the display's triangle against each).
+Files go to `$XDG_DATA_HOME/displaycraft/reports/<output>-report-<stamp>`
+(`.ti1`, `.ti3`, `.txt`).
+
+## Profiles
+
+Rows are the union of the installed profiles
+(`$XDG_CONFIG_HOME/color/icc/devices/display`, where ucmm puts them) and
+DisplayCraft's, merged by file name since installing keeps the name.
+Description, date and white point come from the profile itself: header date
+(UTC, shown local), `desc`/`mluc`, and `wtpt` for v2 profiles only (v4
+ones record D50). dispcal describes its profiles by their output path, so
+those show the file name. The verdict is the newest `verify/` report's.
+What's in use comes from `kscreen-doctor -o` (its JSON leaves out the
+profile source): a profile counts only in ICC mode, since after `dispwin -U`
+KWin keeps the path but switches to sRGB.
+
+- Use: `dispwin -d D -I path`. ucmm reads the whole file before writing,
+  so installing a profile from its own folder is safe, and it deletes the
+  replaced installed copy.
+- Stop using a profile: `dispwin -d D -U`, which deletes the installed copy
+  and returns KWin to sRGB; DisplayCraft's own copy stays.
+- Delete (DisplayCraft's profiles not in use, after confirmation): the
+  `.icc` and its `.cal`.
+
 ## Verified
 
 - Builds with Rust 1.99; unit tests cover the usage parser, progress and
@@ -216,6 +271,21 @@ made before then should be remade.
   `tmp/page-*.png`: Verify at 640 and 900 points tall and with the log
   open. The patch list grew with the window and shrank for the open log.
 
+- Launched from the installed desktop entry: the window appeared at once
+  with the spinner, the display list arrived a few seconds later, and KWin
+  showed the icon in the title bar.
+- Profile switching, run as the page's `dispwin` commands: Use made KWin
+  load the chosen profile; Stop returned it to sRGB and removed the
+  installed copy; reinstalling the original from DisplayCraft's copy left
+  `color.jcnf` byte-identical and the installed folder as before.
+- `app::hardware_report_tests::report_through_ui` (ignored by default)
+  measures both reports through the page. Uncalibrated: white 233.9 cd/m²,
+  black 0.128 (all three readings), 1830:1, gamma 2.21, x 0.3124, y 0.3425;
+  dispcal -R on the same panel gave 242.7, 0.130, 1865:1, 2.23, x 0.3109,
+  y 0.3416. Primaries x 0.665/0.203/0.143: 100% of sRGB and Adobe RGB, 94%
+  of Display P3.
+
 Not yet tested by hand: the Preferences dialog (opening, Browse, Apply), and
 the correction list and Browse on the Spectro page, Export CSV, and the
-Measure and Cancel buttons while measuring.
+Measure and Cancel buttons while measuring, the Profiles page's buttons
+(clicked), and deleting a profile.

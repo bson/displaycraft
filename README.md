@@ -5,7 +5,10 @@ look of the ArtCraft applications (egui with the ArtCraft `craft-ui` library).
 It walks through picking a display and instrument (with a colorimeter
 correction if wanted), setting calibration targets, then calibrating, making
 an ICC profile and installing it, and verifying how accurate a profile is.
-Verification results can be exported as CSV.
+Verification results can be exported as CSV. A display report measures
+brightness, contrast, gamma, white point and gamut coverage, uncalibrated
+or as calibrated, and a profiles page shows which profile KWin is using
+and switches, removes or deletes them.
 
 The measuring is done by ArgyllCMS, which DisplayCraft runs as separate
 programs. On KDE Plasma under Wayland it needs the Wayland build of ArgyllCMS,
@@ -28,8 +31,15 @@ DisplayCraft is not affiliated with ArtCraft.
 
     cargo run --release
 
+To install it for the current user, with its icon and an entry in the
+application launcher:
+
+    ./install.sh               # or PREFIX=/usr/local ./install.sh
+    ./install.sh --uninstall
+
 Calibrations and profiles are saved in `~/.local/share/displaycraft/`,
-verification reports in its `verify/` folder, and
+verification reports in its `verify/` folder, display reports in
+`reports/`, and
 preferences in `~/.config/displaycraft/settings.toml`.
 
 ## License

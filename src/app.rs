@@ -8,6 +8,8 @@ use egui::{Align, Layout, RichText, ScrollArea};
 
 use crate::argyll::{self, Event, Inventory, Job};
 use crate::corrections::{self, Correction};
+use crate::profiles;
+use crate::report;
 use crate::settings::Settings;
 use crate::targets::{Quality, Tone, White};
 use crate::verify;
@@ -20,10 +22,15 @@ enum Step {
     Targets,
     Run,
     Verify,
+    Report,
+    Profiles,
 }
 
 impl Step {
-    const ALL: [Step; 5] = [Step::Display, Step::Instrument, Step::Targets, Step::Run, Step::Verify];
+    /// The calibration sequence, numbered in the sidebar
+    const WORKFLOW: [Step; 5] = [Step::Display, Step::Instrument, Step::Targets, Step::Run, Step::Verify];
+    /// Pages outside the sequence, listed below it
+    const TOOLS: [Step; 2] = [Step::Report, Step::Profiles];
 
     fn label(self) -> &'static str {
         match self {
@@ -32,6 +39,8 @@ impl Step {
             Step::Targets => "Settings",
             Step::Run => "Measure",
             Step::Verify => "Verify",
+            Step::Report => "Report",
+            Step::Profiles => "Profiles",
         }
     }
 }
@@ -41,6 +50,11 @@ enum JobKind {
     Calibrate,
     Install,
     Verify,
+    Report,
+    /// Install a profile from the Profiles page
+    UseProfile,
+    /// Uninstall the display's profile, back to sRGB
+    StopProfile,
 }
 
 impl JobKind {
@@ -49,6 +63,8 @@ impl JobKind {
         match self {
             JobKind::Calibrate | JobKind::Install => Step::Run,
             JobKind::Verify => Step::Verify,
+            JobKind::Report => Step::Report,
+            JobKind::UseProfile | JobKind::StopProfile => Step::Profiles,
         }
     }
 }
@@ -119,7 +135,71 @@ impl Prefs {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ReportMode {
+    /// The display's own response, through a linear calibration
+    Uncalibrated,
+    /// Through whatever calibration is loaded
+    Current,
+}
+
+impl ReportMode {
+    fn title(self) -> &'static str {
+        match self {
+            ReportMode::Uncalibrated => "uncalibrated",
+            ReportMode::Current => "as calibrated now",
+        }
+    }
+}
+
+/// A report in progress: its base file name and what it measures
+struct ReportRun {
+    base: PathBuf,
+    mode: ReportMode,
+    output: String,
+}
+
+struct ReportOutcome {
+    report: report::Report,
+    title: String,
+    saved: PathBuf,
+}
+
+/// One profile on the Profiles page. A DisplayCraft profile and its
+/// installed copy share a file name, so they're one row.
+struct ProfileRow {
+    name: String,
+    info: profiles::Info,
+    /// DisplayCraft's own copy
+    made: Option<PathBuf>,
+    /// The copy installed for displays
+    installed: Option<PathBuf>,
+    verdict: Option<String>,
+}
+
+impl ProfileRow {
+    fn path(&self) -> &std::path::Path {
+        self.installed.as_deref().or(self.made.as_deref()).expect("a row has at least one copy")
+    }
+}
+
+/// What the Profiles page shows, read when it's opened and after changes
+struct ProfilesView {
+    output: String,
+    color: Option<profiles::OutputColor>,
+    rows: Vec<ProfileRow>,
+}
+
+/// What a background scan found
+struct Scan {
+    platform: argyll::Platform,
+    inventory: Result<Inventory, String>,
+}
+
 pub struct App {
+    ctx: egui::Context,
+    /// A scan for displays and instruments in progress
+    scan: Option<Receiver<Scan>>,
     settings: Settings,
     prefs: Option<Prefs>,
     bin: Option<PathBuf>,
@@ -158,6 +238,12 @@ pub struct App {
     csv_picker: Option<Receiver<Option<PathBuf>>>,
     /// Height of the Verify page's log section last frame, open or closed
     verify_log_height: f32,
+    report_mode: ReportMode,
+    report_run: Option<ReportRun>,
+    report_outcome: Option<ReportOutcome>,
+    profiles_view: Option<ProfilesView>,
+    /// A DisplayCraft profile waiting for the user to confirm deleting it
+    delete_confirm: Option<PathBuf>,
 }
 
 impl App {
@@ -172,6 +258,8 @@ impl App {
             .unwrap_or_default();
         theme::apply_kind(&cc.egui_ctx, theme);
         let mut app = App {
+            ctx: cc.egui_ctx.clone(),
+            scan: None,
             bin: argyll::find_bin_dir(settings.argyll_bin.as_deref()),
             settings,
             prefs: None,
@@ -200,6 +288,11 @@ impl App {
             verify_outcome: None,
             csv_picker: None,
             verify_log_height: 30.0,
+            report_mode: ReportMode::Uncalibrated,
+            report_run: None,
+            report_outcome: None,
+            profiles_view: None,
+            delete_confirm: None,
         };
         app.refresh_inventory();
         app.verify_profile = app.saved_profiles().into_iter().next();
@@ -209,21 +302,39 @@ impl App {
     /// Identify what can be measured: first whether ArgyllCMS supports this
     /// session at all, then the displays and instruments.
     fn refresh_inventory(&mut self) {
-        let Some(bin) = &self.bin else {
+        let Some(bin) = self.bin.clone() else {
+            self.scan = None;
             self.platform = None;
             self.inventory = Inventory::default();
             self.inventory_error = Some("ArgyllCMS wasn't found. Set its directory in Preferences.".into());
             return;
         };
-        let platform = argyll::check_platform(bin);
-        let unsupported = matches!(platform, argyll::Platform::Unsupported(_));
-        self.platform = Some(platform);
-        if unsupported {
-            self.inventory = Inventory::default();
-            self.inventory_error = None;
-            return;
-        }
-        match argyll::inventory(bin) {
+        // dispcal -? looks for instruments, which takes seconds, so it runs
+        // on its own thread and the window opens at once. A scan started
+        // while another runs replaces it; the old one's result is dropped.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let platform = argyll::check_platform(&bin);
+            let inventory = match platform {
+                argyll::Platform::Unsupported(_) => Ok(Inventory::default()),
+                _ => argyll::inventory(&bin).map_err(|e| {
+                    format!("Couldn't run dispcal in {}: {e}. Check the ArgyllCMS directory in Preferences.", bin.display())
+                }),
+            };
+            let _ = tx.send(Scan { platform, inventory });
+            ctx.request_repaint();
+        });
+        self.scan = Some(rx);
+    }
+
+    /// Take a finished scan's result
+    fn poll_scan(&mut self) {
+        let Some(rx) = &self.scan else { return };
+        let Ok(scan) = rx.try_recv() else { return };
+        self.scan = None;
+        self.platform = Some(scan.platform);
+        match scan.inventory {
             Ok(inv) => {
                 self.display = self.display.min(inv.displays.len().saturating_sub(1));
                 self.instrument = self.instrument.min(inv.instruments.len().saturating_sub(1));
@@ -233,8 +344,7 @@ impl App {
             }
             Err(e) => {
                 self.inventory = Inventory::default();
-                self.inventory_error =
-                    Some(format!("Couldn't run dispcal in {}: {e}. Check the ArgyllCMS directory in Preferences.", bin.display()));
+                self.inventory_error = Some(e);
             }
         }
     }
@@ -247,7 +357,9 @@ impl App {
     }
 
     fn ready(&self) -> Result<(), &'static str> {
-        if self.unsupported().is_some() {
+        if self.scan.is_some() {
+            Err("Looking for displays and instruments…")
+        } else if self.unsupported().is_some() {
             Err("ArgyllCMS can't run on this platform")
         } else if self.inventory.displays.is_empty() {
             Err("No display found")
@@ -322,6 +434,13 @@ impl App {
             });
         }
         self.display_type.and_then(|i| self.inventory.display_types.get(i)).map(|dt| dt.description.clone())
+    }
+
+    fn looking(ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Looking for displays and instruments…");
+        });
     }
 
     /// Space between a page's parts: one and a half text rows
@@ -449,7 +568,8 @@ impl App {
         self.log.push(format!("$ {tool} {}", args.join(" ")));
         self.progress = None;
         self.prompt = None;
-        self.placing = kind != JobKind::Install;
+        // Jobs that measure start by asking for the instrument to be placed
+        self.placing = matches!(kind, JobKind::Calibrate | JobKind::Verify | JobKind::Report);
         self.cancelled = false;
         self.status = None;
         let ctx = ctx.clone();
@@ -522,6 +642,28 @@ impl App {
                     },
                     _ => self.status = Some((false, "Verification didn't finish. See the log.".into())),
                 }
+            }
+            JobKind::Report => {
+                let run = self.report_run.take();
+                match (ok, run) {
+                    _ if cancelled => self.status = None,
+                    (true, Some(run)) => match self.finish_report(run) {
+                        Ok(outcome) => {
+                            self.status = None;
+                            self.report_outcome = Some(outcome);
+                        }
+                        Err(why) => self.status = Some((false, why)),
+                    },
+                    _ => self.status = Some((false, "The report didn't finish. See the log.".into())),
+                }
+            }
+            JobKind::UseProfile | JobKind::StopProfile => {
+                self.status = match (ok, kind) {
+                    (true, JobKind::UseProfile) => Some((true, "KWin now uses this profile for the display.".into())),
+                    (true, _) => Some((true, "The display no longer uses a profile; KWin treats it as sRGB.".into())),
+                    (false, _) => Some((false, "Changing the profile failed. See the log.".into())),
+                };
+                self.refresh_profiles();
             }
             JobKind::Install => {
                 if ok {
@@ -682,16 +824,29 @@ impl App {
         ui.add_space(12.0);
         ui.vertical_centered(|ui| ui.add(logo(112.0)));
         ui.add_space(10.0);
-        let running = self.job.is_some();
-        for (i, step) in Step::ALL.into_iter().enumerate() {
+        let numbered = Step::WORKFLOW.into_iter().enumerate().map(|(i, s)| (Some(i + 1), s));
+        let tools = Step::TOOLS.into_iter().map(|s| (None, s));
+        for (number, step) in numbered.chain(tools) {
+            if number.is_none() && step == Step::TOOLS[0] {
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+            }
             let selected = self.step == step;
-            let text = RichText::new(format!("{}  {}", i + 1, step.label())).color(if selected { t.text } else { t.text_label });
+            let label = match number {
+                Some(n) => format!("{n}  {}", step.label()),
+                None => step.label().to_string(),
+            };
+            let text = RichText::new(label).color(if selected { t.text } else { t.text_label });
             let button = egui::Button::new(text).selected(selected).min_size(egui::vec2(ui.available_width(), 30.0));
-            // Settings can't change under a running calibration
+            // Settings can't change under a running job
             let job_step = self.job.as_ref().map(|(kind, _)| kind.step());
             let usable = self.unsupported().is_none();
-            if ui.add_enabled(usable && (!running || Some(step) == job_step), button).clicked() {
+            if ui.add_enabled(usable && (job_step.is_none() || Some(step) == job_step), button).clicked() && self.step != step {
                 self.step = step;
+                if step == Step::Profiles {
+                    self.refresh_profiles();
+                }
             }
         }
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
@@ -738,14 +893,16 @@ impl App {
              its center, so if this window is at the center you may wish to move it aside.",
         );
         Self::gap(ui);
-        if self.inventory.displays.is_empty() {
+        if self.scan.is_some() {
+            Self::looking(ui);
+        } else if self.inventory.displays.is_empty() {
             ui.label("No displays found.");
         }
         for (i, d) in self.inventory.displays.iter().enumerate() {
             ui.radio_value(&mut self.display, i, &d.description);
         }
         Self::gap(ui);
-        if ui.button("Refresh").clicked() {
+        if ui.add_enabled(self.scan.is_none(), egui::Button::new("Refresh")).clicked() {
             self.refresh_inventory();
         }
     }
@@ -756,14 +913,16 @@ impl App {
         Self::gap(ui);
         ui.label("Select the measurement device to use.");
         Self::gap(ui);
-        if self.inventory.instruments.is_empty() {
+        if self.scan.is_some() {
+            Self::looking(ui);
+        } else if self.inventory.instruments.is_empty() {
             ui.label(RichText::new("No instrument found. Connect one, then refresh.").color(t.caution));
         }
         for (i, inst) in self.inventory.instruments.iter().enumerate() {
             ui.radio_value(&mut self.instrument, i, instrument_name(&inst.description)).on_hover_text(&inst.description);
         }
         Self::gap(ui);
-        if ui.button("Refresh").clicked() {
+        if ui.add_enabled(self.scan.is_none(), egui::Button::new("Refresh")).clicked() {
             self.refresh_inventory();
         }
         self.corrections_section(ui);
@@ -979,6 +1138,320 @@ impl App {
 
         Self::gap(ui);
         egui::CollapsingHeader::new("Log").default_open(false).show(ui, |ui| self.log_view(ui, f32::INFINITY));
+    }
+
+    fn start_report(&mut self, ctx: &egui::Context) {
+        let Some(bin) = self.bin.clone() else { return };
+        let fail = |app: &mut App, why: String| app.status = Some((false, why));
+        let dir = match Self::data_dir().map(|d| d.join("reports")) {
+            Ok(d) => d,
+            Err(e) => return fail(self, format!("No place for the report: {e}")),
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return fail(self, format!("Can't create {}: {e}", dir.display()));
+        }
+        let display = &self.inventory.displays[self.display];
+        let output = output_name(&display.description);
+        let base = dir.join(format!("{output}-report-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+        if let Err(e) = report::write_ti1(&base.with_extension("ti1")) {
+            return fail(self, format!("Can't write the patch set: {e}"));
+        }
+        let mut args: Vec<String> = vec!["-v".into(), "-d".into(), display.value.clone()];
+        args.extend(self.instrument_args());
+        if self.report_mode == ReportMode::Uncalibrated {
+            // dispread otherwise measures through the calibration in effect
+            let linear = dir.join("linear.cal");
+            if let Err(e) = report::write_linear_cal(&linear) {
+                return fail(self, format!("Can't write {}: {e}", linear.display()));
+            }
+            args.extend(["-k".into(), linear.display().to_string()]);
+        }
+        args.push(base.display().to_string());
+        self.start_job(ctx, JobKind::Report, &bin, "dispread", &args);
+        self.report_run = Some(ReportRun { base, mode: self.report_mode, output });
+        self.report_outcome = None;
+    }
+
+    fn finish_report(&mut self, run: ReportRun) -> Result<ReportOutcome, String> {
+        let text = std::fs::read_to_string(run.base.with_extension("ti3")).map_err(|e| format!("Can't read the measurements: {e}"))?;
+        let measured = report::read_ti3(&text).ok_or("The measurements are incomplete")?;
+        let r = report::analyze(&measured).ok_or("White measured no brighter than black. Was the instrument on the screen?")?;
+        let title = format!("{}, {}", run.output, run.mode.title());
+        let saved = run.base.with_extension("txt");
+        std::fs::write(&saved, report::text(&r, &title)).map_err(|e| format!("Can't write the report: {e}"))?;
+        Ok(ReportOutcome { report: r, title, saved })
+    }
+
+    fn page_report(&mut self, ui: &mut egui::Ui) {
+        let t = Tokens::get(ui.ctx());
+        ui.heading("Display Report");
+        Self::gap(ui);
+        ui.label(
+            "Measures what the display does: its brightness, contrast, gamma, white point and how much of the \
+             standard color spaces it can show. Measuring it uncalibrated shows what calibration has to work with.",
+        );
+        Self::gap(ui);
+        let running = self.job.is_some();
+        ui.add_enabled_ui(!running, |ui| {
+            choices(ui, |ui| {
+                ui.radio_value(&mut self.report_mode, ReportMode::Uncalibrated, "Uncalibrated");
+                ui.radio_value(&mut self.report_mode, ReportMode::Current, "As calibrated now");
+            });
+        });
+        Self::gap(ui);
+        if self.job_controls(ui, JobKind::Report) {
+            let ctx = ui.ctx().clone();
+            self.start_report(&ctx);
+        }
+
+        if let Some(o) = &self.report_outcome {
+            let r = &o.report;
+            Self::gap(ui);
+            egui::Frame::new().fill(t.inset).corner_radius(4).inner_margin(10).show(ui, |ui| {
+                ui.label(RichText::new(&o.title).font(t.semibold(13.0)).color(t.text));
+                ui.add_space(4.0);
+                let value = |ui: &mut egui::Ui, text: String| ui.label(RichText::new(text).color(t.text));
+                egui::Grid::new("report").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                    ui.label("White luminance");
+                    value(ui, format!("{:.1} cd/m²", r.white));
+                    ui.end_row();
+                    ui.label("Black luminance");
+                    value(ui, format!("{:.3} cd/m²", r.black));
+                    ui.end_row();
+                    ui.label("Contrast ratio");
+                    value(ui, format!("{:.0}:1", r.contrast));
+                    ui.end_row();
+                    ui.label("Gamma");
+                    value(ui, format!("{:.2}", r.gamma));
+                    ui.end_row();
+                    ui.label("White point");
+                    value(ui, format!("x {:.4}, y {:.4}  (about {:.0} K)", r.white_xy.0, r.white_xy.1, r.cct));
+                    ui.end_row();
+                    for c in &r.coverage {
+                        ui.label(format!("{} coverage", c.name));
+                        value(ui, format!("{:.1}%  (relative size {:.1}%)", c.covered, c.relative));
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(RichText::new("Coverage is by area in the CIE 1976 u'v' diagram.").small().color(t.text_dim));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Saved: {}", o.saved.display())).small().color(t.text_dim));
+                    if ui.small_button("Open").clicked() {
+                        let _ = std::process::Command::new("xdg-open").arg(&o.saved).spawn();
+                    }
+                });
+            });
+        }
+
+        Self::gap(ui);
+        egui::CollapsingHeader::new("Log").default_open(false).show(ui, |ui| self.log_view(ui, 180.0));
+    }
+
+    /// Read the profiles and KWin's state for the Profiles page
+    fn refresh_profiles(&mut self) {
+        let output = self.inventory.displays.get(self.display).map(|d| output_name(&d.description)).unwrap_or_default();
+        let mut rows: Vec<ProfileRow> = Vec::new();
+        let verify_dir = Self::data_dir().map(|d| d.join("verify")).ok();
+        let mut add = |path: PathBuf, made: bool| {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let row = match rows.iter_mut().position(|r| r.name == name) {
+                Some(i) => &mut rows[i],
+                None => {
+                    let info = profiles::read(&path).unwrap_or_default();
+                    let verdict = verify_dir.as_deref().and_then(|d| profiles::last_verdict(d, &path));
+                    rows.push(ProfileRow { name, info, made: None, installed: None, verdict });
+                    rows.last_mut().unwrap()
+                }
+            };
+            if made { row.made = Some(path) } else { row.installed = Some(path) }
+        };
+        if let Some(dir) = profiles::installed_dir() {
+            for p in profiles::list(&dir) {
+                add(p, false);
+            }
+        }
+        if let Ok(dir) = Self::data_dir() {
+            for p in profiles::list(&dir) {
+                add(p, true);
+            }
+        }
+        rows.sort_by(|a, b| b.info.created.cmp(&a.info.created));
+        let color = if output.is_empty() { None } else { profiles::output_color(&output) };
+        self.profiles_view = Some(ProfilesView { output, color, rows });
+    }
+
+    fn page_profiles(&mut self, ui: &mut egui::Ui) {
+        let t = Tokens::get(ui.ctx());
+        ui.heading("Profiles");
+        Self::gap(ui);
+        if self.profiles_view.is_none() {
+            self.refresh_profiles();
+        }
+        let running = self.job.is_some();
+        let manageable = self.scan.is_none() && self.unsupported().is_none() && !self.inventory.displays.is_empty();
+        let Some(view) = &self.profiles_view else { return };
+        let active = view.color.as_ref().and_then(|c| c.active()).map(PathBuf::from);
+        let same = |a: &std::path::Path, b: &std::path::Path| {
+            a == b || a.canonicalize().ok().is_some_and(|ca| b.canonicalize().ok().is_some_and(|cb| ca == cb))
+        };
+        ui.label(format!(
+            "The profiles DisplayCraft made, and those installed for displays. KWin uses one for {} at a time.",
+            if view.output.is_empty() { "a display".to_string() } else { view.output.clone() }
+        ));
+        Self::gap(ui);
+        match (&view.color, &active) {
+            (None, _) => ui.label(RichText::new("KWin couldn't be asked which profile this display uses.").color(t.caution)),
+            (Some(_), Some(p)) => ui.label(format!("In use: {}", p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default())),
+            (Some(_), None) => ui.label("In use: none. KWin treats the display as sRGB."),
+        };
+        Self::gap(ui);
+
+        let mut action: Option<(JobKind, Option<PathBuf>)> = None;
+        let mut delete: Option<PathBuf> = None;
+        egui::Grid::new("profiles").num_columns(6).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
+            for h in ["Profile", "Created", "White point", "Verified", "", ""] {
+                ui.label(RichText::new(h).color(t.text_dim));
+            }
+            ui.end_row();
+            for row in &view.rows {
+                let in_use = active.as_deref().is_some_and(|a| row.installed.as_deref().is_some_and(|i| same(a, i)) || row.made.as_deref().is_some_and(|m| same(a, m)));
+                // dispcal describes its profiles by their output path, so
+                // those go by file name
+                let description = &row.info.description;
+                let title = if description.is_empty() || description.contains('/') {
+                    row.name.trim_end_matches(".icc").trim_end_matches(".icm").to_string()
+                } else {
+                    description.clone()
+                };
+                let mut where_ = Vec::new();
+                if let Some(p) = &row.made {
+                    where_.push(format!("Made by DisplayCraft: {}", p.display()));
+                }
+                if let Some(p) = &row.installed {
+                    where_.push(format!("Installed: {}", p.display()));
+                }
+                // A fixed width, so a long name (DisplayCAL's run to 60
+                // characters) doesn't push the buttons out of the window
+                let text = RichText::new(title).color(if in_use { t.text } else { t.text_label });
+                ui.allocate_ui_with_layout(egui::vec2(250.0, 18.0), Layout::left_to_right(Align::Center), |ui| {
+                    ui.set_min_width(250.0);
+                    ui.add(egui::Label::new(text).truncate()).on_hover_text(where_.join("\n"));
+                });
+                ui.label(&row.info.created);
+                match (row.info.white, row.info.cct()) {
+                    (Some((x, y)), Some(k)) => ui.label(format!("~{k:.0} K")).on_hover_text(format!("x {x:.4}, y {y:.4}")),
+                    _ => ui.label(RichText::new("—").color(t.text_dim)),
+                };
+                match row.verdict.as_deref() {
+                    Some(v) => {
+                        let c = match v {
+                            "Good" => t.good,
+                            "Acceptable" => t.caution,
+                            _ => t.bad,
+                        };
+                        ui.label(RichText::new(v).color(c))
+                    }
+                    None => ui.label(RichText::new("—").color(t.text_dim)),
+                };
+                if in_use {
+                    ui.label(RichText::new("In use").color(t.good));
+                } else if ui.add_enabled(manageable && !running, egui::Button::new("Use")).clicked() {
+                    action = Some((JobKind::UseProfile, Some(row.path().to_path_buf())));
+                }
+                match &row.made {
+                    Some(p) if !in_use => {
+                        if ui.add_enabled(!running, egui::Button::new("Delete…")).clicked() {
+                            delete = Some(p.clone());
+                        }
+                    }
+                    _ => {
+                        ui.label("");
+                    }
+                }
+                ui.end_row();
+            }
+        });
+        if view.rows.is_empty() {
+            ui.label(RichText::new("No profiles yet.").color(t.text_dim));
+        }
+
+        Self::gap(ui);
+        ui.horizontal(|ui| {
+            if active.is_some() && ui.add_enabled(manageable && !running, egui::Button::new("Stop using a profile")).clicked() {
+                action = Some((JobKind::StopProfile, None));
+            }
+            if ui.add_enabled(!running, egui::Button::new("Refresh")).clicked() {
+                self.refresh_profiles();
+            }
+            if let Some((ok, text)) = &self.status {
+                ui.label(RichText::new(text).color(if *ok { t.good } else { t.bad }));
+            }
+        });
+        if active.is_some() {
+            ui.label(
+                RichText::new("Stopping removes the installed copy; a profile DisplayCraft made stays here and can be used again.")
+                    .small()
+                    .color(t.text_dim),
+            );
+        }
+        if running {
+            self.progress_bar(ui);
+        }
+
+        if let Some(p) = delete {
+            self.delete_confirm = Some(p);
+        }
+        if let (Some((kind, path)), Some(bin)) = (action, self.bin.clone()) {
+            let display = self.inventory.displays[self.display].value.clone();
+            let mut args = vec!["-d".to_string(), display];
+            match path {
+                Some(p) => args.extend(["-I".into(), p.display().to_string()]),
+                None => args.push("-U".into()),
+            }
+            let ctx = ui.ctx().clone();
+            self.start_job(&ctx, kind, &bin, "dispwin", &args);
+        }
+        self.delete_dialog(ui.ctx());
+    }
+
+    /// Confirm deleting one of DisplayCraft's profiles, with its calibration
+    fn delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.delete_confirm.clone() else { return };
+        let t = Tokens::get(ctx);
+        let mut answer = None;
+        egui::Modal::new(egui::Id::new("delete-profile")).show(ctx, |ui| {
+            ui.set_max_width(440.0);
+            ui.label(RichText::new("Delete this profile?").font(t.semibold(14.0)).color(t.text));
+            ui.add_space(6.0);
+            ui.label(path.display().to_string());
+            ui.label(RichText::new("Its calibration file goes too. Installed copies aren't affected.").color(t.text_dim));
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Delete").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Keep").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        match answer {
+            Some(true) => {
+                let _ = std::fs::remove_file(path.with_extension("cal"));
+                self.status = match std::fs::remove_file(&path) {
+                    Ok(()) => None,
+                    Err(e) => Some((false, format!("Can't delete {}: {e}", path.display()))),
+                };
+                if self.verify_profile.as_deref() == Some(path.as_path()) {
+                    self.verify_profile = self.saved_profiles().into_iter().next();
+                }
+                self.delete_confirm = None;
+                self.refresh_profiles();
+            }
+            Some(false) => self.delete_confirm = None,
+            None => {}
+        }
     }
 
     /// Start, and while a job runs, what it's waiting for and Cancel.
@@ -1249,7 +1722,7 @@ impl App {
 /// The DisplayCraft logo, `size` points square. The image has an opaque
 /// dark background, so it's drawn as a rounded tile.
 fn logo(size: f32) -> egui::Image<'static> {
-    egui::Image::new(egui::include_image!("../assets/displaycraft-256.png"))
+    egui::Image::new(egui::include_image!("../assets/icons/hicolor/256x256/apps/displaycraft.png"))
         .fit_to_exact_size(egui::vec2(size, size))
         .corner_radius((size * 0.14) as u8)
 }
@@ -1306,6 +1779,7 @@ fn output_name(description: &str) -> String {
 
 impl eframe::App for App {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_scan();
         self.poll_job();
     }
 
@@ -1348,6 +1822,10 @@ impl eframe::App for App {
                 Step::Targets => self.page_targets(ui),
                 Step::Run => self.page_run(ui),
                 Step::Verify => self.page_verify(ui),
+                Step::Report => self.page_report(ui),
+                Step::Profiles => {
+                    ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.page_profiles(ui));
+                }
             }
         });
         self.preferences(&ctx);
@@ -1373,6 +1851,16 @@ mod hardware_tests {
 
     /// Step the UI until no tool is running, answering Argyll's prompts the
     /// way a user would.
+    pub(super) fn wait_for_scan(harness: &mut Harness<'_, App>) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while harness.state().scan.is_some() {
+            assert!(Instant::now() < deadline, "the device scan didn't finish");
+            std::thread::sleep(Duration::from_millis(50));
+            harness.step();
+        }
+        harness.run_steps(2);
+    }
+
     pub(super) fn run_until_idle(harness: &mut Harness<'_, App>, limit: Duration) {
         let deadline = Instant::now() + limit;
         loop {
@@ -1399,7 +1887,7 @@ mod hardware_tests {
     #[ignore = "needs ArgyllCMS, an instrument on the screen, and installs a profile"]
     fn calibrate_profile_and_install() {
         let mut harness = Harness::builder().with_size(egui::vec2(980.0, 640.0)).build_eframe(|cc| App::new(cc));
-        harness.run_steps(2);
+        wait_for_scan(&mut harness);
         assert!(harness.state().ready().is_ok(), "{:?}", harness.state().ready());
 
         harness.get_by_label_contains("Measure").click();
@@ -1442,7 +1930,7 @@ mod hardware_verify_tests {
     #[ignore = "needs ArgyllCMS, an instrument on the screen, and a saved profile"]
     fn verify_profile_through_ui() {
         let mut harness = Harness::builder().with_size(egui::vec2(980.0, 640.0)).build_eframe(|cc| App::new(cc));
-        harness.run_steps(2);
+        super::hardware_tests::wait_for_scan(&mut harness);
         if let Some(p) = std::env::var_os("DISPLAYCRAFT_TEST_PROFILE") {
             harness.state_mut().verify_profile = Some(PathBuf::from(p));
         }
@@ -1465,6 +1953,39 @@ mod hardware_verify_tests {
         );
         assert_eq!(o.results.len(), verify::patches().len());
         assert!(o.report.is_file());
+    }
+}
+
+#[cfg(test)]
+mod hardware_report_tests {
+    use std::time::Duration;
+
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+
+    /// Measures a display report through the Report page with the real
+    /// ArgyllCMS and instrument, uncalibrated and as calibrated now.
+    /// Measures only; changes no display settings.
+    #[test]
+    #[ignore = "needs ArgyllCMS and an instrument on the screen"]
+    fn report_through_ui() {
+        let mut harness = Harness::builder().with_size(egui::vec2(980.0, 640.0)).build_eframe(|cc| App::new(cc));
+        super::hardware_tests::wait_for_scan(&mut harness);
+        harness.get_by_label("Report").click();
+        harness.run_steps(2);
+        for mode in [ReportMode::Uncalibrated, ReportMode::Current] {
+            harness.state_mut().report_mode = mode;
+            harness.run_steps(2);
+            harness.get_by_label("Start").click();
+            harness.step();
+            assert!(harness.state().job.is_some(), "Start didn't launch dispread: {:?}", harness.state().status);
+            super::hardware_tests::run_until_idle(&mut harness, Duration::from_secs(300));
+            let app = harness.state();
+            let o = app.report_outcome.as_ref().unwrap_or_else(|| panic!("no report: {:?}; log:\n{}", app.status, app.log.join("\n")));
+            println!("{}", std::fs::read_to_string(&o.saved).unwrap());
+        }
     }
 }
 
@@ -1501,7 +2022,7 @@ mod page_pictures {
         std::fs::create_dir_all(&dir).unwrap();
         let shoot = |step: Step, height: f32, log_open: bool, name: &str| {
             let mut harness = Harness::builder().with_size(egui::vec2(980.0, height)).wgpu().build_eframe(|cc| App::new(cc));
-            harness.run_steps(2);
+            super::hardware_tests::wait_for_scan(&mut harness);
             let app = harness.state_mut();
             app.step = step;
             app.settings.targets.white = White::D55;
@@ -1512,6 +2033,20 @@ mod page_pictures {
             let summary = verify::summarize(&results, |i| i <= 21).unwrap();
             app.verify_outcome = Some(VerifyOutcome { profile: "/x/eDP-1-test.icc".into(), summary, results, report: "/x/report.txt".into() });
             app.log = vec!["$ dispread -v ...".into(), "Setting up the instrument".into()];
+            // The report from this display's uncalibrated measurement
+            let m: Vec<[f64; 3]> = report::PATCHES
+                .iter()
+                .map(|p| {
+                    let l = |v: f64| (v / 100.0).powf(2.23);
+                    let (r, g, b) = (l(p[0]), l(p[1]), l(p[2]));
+                    [0.12 + 230.0 * (0.43 * r + 0.34 * g + 0.18 * b), 0.13 + 242.0 * (0.22 * r + 0.70 * g + 0.08 * b), 0.14 + 260.0 * (0.02 * r + 0.11 * g + 0.95 * b)]
+                })
+                .collect();
+            app.report_outcome = Some(ReportOutcome {
+                report: report::analyze(&m).unwrap(),
+                title: "eDP-1, uncalibrated".into(),
+                saved: "/x/eDP-1-report.txt".into(),
+            });
             harness.run_steps(2);
             if name == "spectro-open" {
                 harness.get_by_value("None (use Instrument Default)").click();
@@ -1535,5 +2070,7 @@ mod page_pictures {
         shoot(Step::Verify, 640.0, false, "verify-640");
         shoot(Step::Verify, 900.0, false, "verify-900");
         shoot(Step::Verify, 900.0, true, "verify-900-log");
+        shoot(Step::Report, 640.0, false, "report");
+        shoot(Step::Profiles, 640.0, false, "profiles");
     }
 }

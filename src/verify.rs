@@ -203,6 +203,18 @@ pub fn report(profile: &Path, summary: &Summary, patches: &[Patch], results: &[P
     s
 }
 
+/// The per-patch results as CSV, one row per patch.
+pub fn csv(patches: &[Patch], results: &[PatchResult]) -> String {
+    let mut s = String::from("Index,Patch,R %,G %,B %,Expected L*,Expected a*,Expected b*,Measured L*,Measured a*,Measured b*,dE00\n");
+    for r in results {
+        let Some(p) = patches.get(r.index - 1) else { continue };
+        let [e, m] = [r.expected_lab, r.measured_lab];
+        let _ = writeln!(s, "{},\"{}\",{:.2},{:.2},{:.2},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+            r.index, p.name.replace('"', "\"\""), p.rgb[0], p.rgb[1], p.rgb[2], e[0], e[1], e[2], m[0], m[1], m[2], r.de);
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +249,10 @@ mod tests {
         assert!((s.maximum - 3.5).abs() < 1e-9);
         assert!((s.gray_maximum - 0.45).abs() < 1e-9);
         assert_eq!(s.verdict, Verdict::Acceptable);
+
+        let text = csv(&patches(), &r);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[2], "2,\"Gray 5%\",5.00,5.00,5.00,50.000,1.000,-1.000,50.500,3.000,-2.000,3.500");
     }
 }

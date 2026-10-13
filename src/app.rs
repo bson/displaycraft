@@ -9,6 +9,7 @@ use egui::{Align, Layout, RichText, ScrollArea};
 use crate::argyll::{self, Event, Inventory, Job};
 use crate::corrections::{self, Correction};
 use crate::settings::Settings;
+use crate::targets::{Quality, Tone, White};
 use crate::verify;
 use crate::theme::{self, ThemeKind, Tokens};
 
@@ -27,63 +28,10 @@ impl Step {
     fn label(self) -> &'static str {
         match self {
             Step::Display => "Display",
-            Step::Instrument => "Instrument",
-            Step::Targets => "Targets",
-            Step::Run => "Calibrate & profile",
+            Step::Instrument => "Spectro",
+            Step::Targets => "Settings",
+            Step::Run => "Measure",
             Step::Verify => "Verify",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum White {
-    Native,
-    Daylight,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Tone {
-    Gamma,
-    Srgb,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Quality {
-    Low,
-    Medium,
-    High,
-}
-
-impl Quality {
-    fn arg(self) -> &'static str {
-        match self {
-            Quality::Low => "l",
-            Quality::Medium => "m",
-            Quality::High => "h",
-        }
-    }
-}
-
-struct Targets {
-    white: White,
-    kelvin: f64,
-    tone: Tone,
-    gamma: f64,
-    set_brightness: bool,
-    brightness: f64,
-    quality: Quality,
-}
-
-impl Default for Targets {
-    fn default() -> Self {
-        Targets {
-            white: White::Daylight,
-            kelvin: 6500.0,
-            tone: Tone::Gamma,
-            gamma: 2.2,
-            set_brightness: false,
-            brightness: 120.0,
-            quality: Quality::Medium,
         }
     }
 }
@@ -184,11 +132,18 @@ pub struct App {
     display: usize,
     instrument: usize,
     display_type: Option<usize>,
-    targets: Targets,
     job: Option<(JobKind, Job)>,
     log: Vec<String>,
     progress: Option<(u32, u32)>,
     prompt: Option<String>,
+    /// From Start until the user says the instrument is in place: the first
+    /// prompt (Argyll's "Place instrument on test window") is answered by
+    /// the Measure button rather than shown
+    placing: bool,
+    /// Cancel was clicked for the running job. Argyll exits with status 0
+    /// when signalled, so this is how a cancelled run is told from a
+    /// finished one.
+    cancelled: bool,
     status: Option<(bool, String)>,
     pending: Option<(PathBuf, PathBuf)>,
     outcome: Option<Outcome>,
@@ -199,6 +154,10 @@ pub struct App {
     verify_picker: Option<Receiver<Option<PathBuf>>>,
     verify_run: Option<VerifyRun>,
     verify_outcome: Option<VerifyOutcome>,
+    /// Where to export the verification CSV, picked on its own thread
+    csv_picker: Option<Receiver<Option<PathBuf>>>,
+    /// Height of the Verify page's log section last frame, open or closed
+    verify_log_height: f32,
 }
 
 impl App {
@@ -224,11 +183,12 @@ impl App {
             display: 0,
             instrument: 0,
             display_type: None,
-            targets: Targets::default(),
             job: None,
             log: Vec::new(),
             progress: None,
             prompt: None,
+            placing: false,
+            cancelled: false,
             status: None,
             pending: None,
             outcome: None,
@@ -238,6 +198,8 @@ impl App {
             verify_picker: None,
             verify_run: None,
             verify_outcome: None,
+            csv_picker: None,
+            verify_log_height: 30.0,
         };
         app.refresh_inventory();
         app.verify_profile = app.saved_profiles().into_iter().next();
@@ -319,19 +281,16 @@ impl App {
             }
         };
         let display = &self.inventory.displays[self.display];
-        let t = &self.targets;
+        let t = &self.settings.targets;
         let mut args: Vec<String> = vec!["-v".into(), "-d".into(), display.value.clone()];
         args.extend(self.instrument_args());
         // Skip the interactive monitor-controls adjustment
         args.push("-m".into());
         args.extend(["-q".into(), t.quality.arg().into()]);
-        if t.white == White::Daylight {
-            args.extend(["-t".into(), format!("{:.0}", t.kelvin)]);
+        if let Some(k) = t.kelvin() {
+            args.extend(["-t".into(), format!("{k:.0}")]);
         }
-        match t.tone {
-            Tone::Gamma => args.extend(["-g".into(), format!("{:.2}", t.gamma)]),
-            Tone::Srgb => args.extend(["-g".into(), "s".into()]),
-        }
+        args.extend(["-g".into(), t.gamma_arg()]);
         if t.set_brightness {
             args.extend(["-b".into(), format!("{:.0}", t.brightness)]);
         }
@@ -343,6 +302,38 @@ impl App {
         self.start_job(ctx, JobKind::Calibrate, &bin, "dispcal", &args);
         self.pending = Some((base.with_extension("cal"), icc));
         self.outcome = None;
+    }
+
+    /// The chosen display, e.g. "eDP-1 (Sharp Corporation eDP-1)"
+    fn display_label(&self) -> Option<String> {
+        let d = self.inventory.displays.get(self.display)?;
+        // Argyll's description leads with "Monitor 1, Output "
+        let text = d.description.split(", ").find_map(|p| p.strip_prefix("Output ")).unwrap_or(&d.description);
+        Some(text.split(" at ").next().unwrap_or(text).to_string())
+    }
+
+    /// The correction for the display's backlight: a correction file, a
+    /// display type, or None for the instrument's default
+    fn correction_label(&self) -> Option<String> {
+        if let Some(path) = &self.settings.correction {
+            return Some(match self.corrections.iter().find(|c| &c.path == path) {
+                Some(c) => c.label(),
+                None => path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            });
+        }
+        self.display_type.and_then(|i| self.inventory.display_types.get(i)).map(|dt| dt.description.clone())
+    }
+
+    /// Space between a page's parts: one and a half text rows
+    fn gap(ui: &mut egui::Ui) {
+        let row = ui.text_style_height(&egui::TextStyle::Body);
+        ui.add_space(row * 1.5);
+    }
+
+    /// A dim line of context under a page's heading
+    fn context_line(ui: &mut egui::Ui, text: String) {
+        let t = Tokens::get(ui.ctx());
+        ui.label(RichText::new(text).color(t.text_dim));
     }
 
     /// The instrument and its correction: a correction file replaces the
@@ -458,6 +449,8 @@ impl App {
         self.log.push(format!("$ {tool} {}", args.join(" ")));
         self.progress = None;
         self.prompt = None;
+        self.placing = kind != JobKind::Install;
+        self.cancelled = false;
         self.status = None;
         let ctx = ctx.clone();
         match Job::start(bin, tool, args, move || ctx.request_repaint()) {
@@ -486,11 +479,21 @@ impl App {
         }
         self.job = None;
         self.prompt = None;
-        let ok = code == Some(0);
+        self.placing = false;
+        let cancelled = std::mem::take(&mut self.cancelled);
+        let ok = code == Some(0) && !cancelled;
         match kind {
             JobKind::Calibrate => {
                 let pending = self.pending.take();
-                if let (true, Some((cal, icc))) = (ok, pending) {
+                if cancelled {
+                    // Whatever dispcal got as far as writing is incomplete
+                    if let Some((cal, icc)) = &pending {
+                        for f in [cal, icc, &cal.with_extension("ti3")] {
+                            let _ = std::fs::remove_file(f);
+                        }
+                    }
+                    self.status = None;
+                } else if let (true, Some((cal, icc))) = (ok, pending.filter(|(cal, icc)| cal.is_file() && icc.is_file())) {
                     let summary = self
                         .log
                         .iter()
@@ -509,6 +512,7 @@ impl App {
             JobKind::Verify => {
                 let run = self.verify_run.take();
                 match (ok, run) {
+                    _ if cancelled => self.status = None,
                     (true, Some(run)) => match self.finish_verification(run) {
                         Ok(outcome) => {
                             self.status = Some((true, format!("Verified: {}", outcome.summary.verdict.label())));
@@ -523,6 +527,7 @@ impl App {
                 if ok {
                     if let Some(o) = self.outcome.as_mut() {
                         o.installed = true;
+                        self.verify_profile = Some(o.icc.clone());
                     }
                     self.status = Some((true, "Profile installed. KWin now uses it for this display.".into()));
                 } else {
@@ -535,10 +540,7 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::get(ui.ctx());
         ui.horizontal(|ui| {
-            ui.label(RichText::new("displaycraft").font(t.semibold(15.0)).color(t.text));
-            if !self.inventory.version.is_empty() {
-                ui.label(RichText::new(format!("ArgyllCMS {}", self.inventory.version)).small().color(t.text_dim));
-            }
+            ui.label(RichText::new(concat!("DisplayCraft ", env!("CARGO_PKG_VERSION"))).font(t.semibold(15.0)).color(t.text));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("Preferences").clicked() && self.prefs.is_none() {
                     self.prefs = Some(Prefs::from_settings(&self.settings));
@@ -697,6 +699,9 @@ impl App {
             if let Some(bin) = &self.bin {
                 ui.label(RichText::new(bin.display().to_string()).small().color(t.text_dim));
             }
+            if !self.inventory.version.is_empty() {
+                ui.label(RichText::new(format!("ArgyllCMS {}", self.inventory.version)).small().color(t.text_dim));
+            }
         });
     }
 
@@ -727,15 +732,19 @@ impl App {
 
     fn page_display(&mut self, ui: &mut egui::Ui) {
         ui.heading("Display");
-        ui.label("The display to calibrate. Test patches appear in the middle of it.");
-        ui.add_space(8.0);
+        Self::gap(ui);
+        ui.label(
+            "Select a display to calibrate. During the calibration process, colored patches will be displayed at \
+             its center, so if this window is at the center you may wish to move it aside.",
+        );
+        Self::gap(ui);
         if self.inventory.displays.is_empty() {
             ui.label("No displays found.");
         }
         for (i, d) in self.inventory.displays.iter().enumerate() {
             ui.radio_value(&mut self.display, i, &d.description);
         }
-        ui.add_space(8.0);
+        Self::gap(ui);
         if ui.button("Refresh").clicked() {
             self.refresh_inventory();
         }
@@ -743,36 +752,21 @@ impl App {
 
     fn page_instrument(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::get(ui.ctx());
-        ui.heading("Instrument");
-        ui.label("The colorimeter or spectrometer to measure with.");
-        ui.add_space(8.0);
+        ui.heading("Spectrophotometer or Colorimeter");
+        Self::gap(ui);
+        ui.label("Select the measurement device to use.");
+        Self::gap(ui);
         if self.inventory.instruments.is_empty() {
             ui.label(RichText::new("No instrument found. Connect one, then refresh.").color(t.caution));
         }
         for (i, inst) in self.inventory.instruments.iter().enumerate() {
-            ui.radio_value(&mut self.instrument, i, &inst.description);
+            ui.radio_value(&mut self.instrument, i, instrument_name(&inst.description)).on_hover_text(&inst.description);
         }
+        Self::gap(ui);
         if ui.button("Refresh").clicked() {
             self.refresh_inventory();
         }
         self.corrections_section(ui);
-        if !self.inventory.display_types.is_empty() {
-            ui.add_space(12.0);
-            ui.label(RichText::new("Display type").font(t.semibold(13.0)).color(t.text));
-            let corrected = self.settings.correction.is_some();
-            ui.label(RichText::new(if corrected {
-                "Not used: the correction file above takes its place."
-            } else {
-                "Matches the instrument's correction to the display's backlight."
-            })
-            .color(t.text_dim));
-            ui.add_enabled_ui(!corrected, |ui| {
-                ui.radio_value(&mut self.display_type, None, "Instrument default");
-                for (i, dt) in self.inventory.display_types.iter().enumerate() {
-                    ui.radio_value(&mut self.display_type, Some(i), format!("{} ({})", dt.description, dt.value));
-                }
-            });
-        }
     }
 
     fn corrections_section(&mut self, ui: &mut egui::Ui) {
@@ -793,36 +787,89 @@ impl App {
                 }
             }
         }
-        ui.add_space(12.0);
+        Self::gap(ui);
         ui.label(RichText::new("Correction").font(t.semibold(13.0)).color(t.text));
-        ui.label(RichText::new("A spectral correction (.ccss) or matrix (.ccmx) for this display's backlight.").color(t.text_dim));
-        let mut chosen = self.settings.correction.clone();
-        ui.radio_value(&mut chosen, None, "None (use the display type below)");
-        for c in &self.corrections {
-            ui.radio_value(&mut chosen, Some(c.path.clone()), c.label())
-                .on_hover_text(c.path.display().to_string());
+        Self::gap(ui);
+        ui.label("An optional spectral correction (.ccss) or matrix (.ccmx) can be selected for the backlight.");
+        Self::gap(ui);
+        // One choice covers both kinds: a display type selects one of the
+        // instrument's built-in corrections (-y), a file is passed with -X
+        #[derive(Clone, PartialEq)]
+        enum Pick {
+            Default,
+            Type(usize),
+            File(PathBuf),
         }
-        // A saved choice that's no longer in the usual places
-        if let Some(path) = chosen.as_ref().filter(|p| !self.corrections.iter().any(|c| &c.path == *p)) {
-            // Only shows the choice; picking another one changes it
-            let _ = ui.radio(true, path.display().to_string());
-        }
+        let current = match (&self.settings.correction, self.display_type) {
+            (Some(path), _) => Pick::File(path.clone()),
+            (None, Some(i)) => Pick::Type(i),
+            (None, None) => Pick::Default,
+        };
+        let mut chosen = current.clone();
+        const NONE: &str = "None (use Instrument Default)";
+        let selected = match &chosen {
+            Pick::Default => NONE.to_string(),
+            Pick::Type(i) => self.inventory.display_types.get(*i).map(|dt| dt.description.clone()).unwrap_or_default(),
+            Pick::File(path) => match self.corrections.iter().find(|c| &c.path == path) {
+                Some(c) => c.label(),
+                // A saved choice that's no longer in the usual places
+                None => path.display().to_string(),
+            },
+        };
         let browsing = self.correction_picker.is_some();
-        if ui.add_enabled(!browsing, egui::Button::new("Browse…")).clicked() {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let ctx = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let picked = rfd::FileDialog::new()
-                    .set_title("Colorimeter correction")
-                    .add_filter("Corrections", &["ccss", "ccmx"])
-                    .pick_file();
-                let _ = tx.send(picked);
-                ctx.request_repaint();
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 90.0).clamp(200.0, 560.0);
+            egui::ComboBox::from_id_salt("correction").width(width).selected_text(selected).show_ui(ui, |ui| {
+                // Some descriptions are long enough to push the list off
+                // the window; they're cut short and shown whole on hover
+                ui.set_max_width(width);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                ui.selectable_value(&mut chosen, Pick::Default, NONE);
+                if !self.inventory.display_types.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new("Built into the instrument").small().color(t.text_dim));
+                    for (i, dt) in self.inventory.display_types.iter().enumerate() {
+                        ui.selectable_value(&mut chosen, Pick::Type(i), &dt.description).on_hover_text(&dt.description);
+                    }
+                }
+                if !self.corrections.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new("Correction files").small().color(t.text_dim));
+                    for c in &self.corrections {
+                        ui.selectable_value(&mut chosen, Pick::File(c.path.clone()), c.label())
+                            .on_hover_text(format!("{}\n{}", c.label(), c.path.display()));
+                    }
+                }
             });
-            self.correction_picker = Some(rx);
-        }
-        if chosen != self.settings.correction {
-            self.set_correction(chosen);
+            if ui.add_enabled(!browsing, egui::Button::new("Browse…")).clicked() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let picked = rfd::FileDialog::new()
+                        .set_title("Colorimeter correction")
+                        .add_filter("Corrections", &["ccss", "ccmx"])
+                        .pick_file();
+                    let _ = tx.send(picked);
+                    ctx.request_repaint();
+                });
+                self.correction_picker = Some(rx);
+            }
+        });
+        if chosen != current {
+            match chosen {
+                Pick::Default => {
+                    self.display_type = None;
+                    self.set_correction(None);
+                }
+                Pick::Type(i) => {
+                    self.display_type = Some(i);
+                    self.set_correction(None);
+                }
+                Pick::File(path) => {
+                    self.display_type = None;
+                    self.set_correction(Some(path));
+                }
+            }
         }
     }
 
@@ -833,23 +880,41 @@ impl App {
 
     fn page_targets(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::get(ui.ctx());
-        let tg = &mut self.targets;
-        ui.heading("Targets");
-        ui.add_space(8.0);
+        ui.heading("Settings");
+        Self::gap(ui);
+        if let Some(d) = self.display_label() {
+            let backlight = self.correction_label().unwrap_or_else(|| "instrument default".into());
+            Self::context_line(ui, format!("Display: {d}  ·  Backlight correction: {backlight}"));
+        }
+        Self::gap(ui);
+        ui.label("What the calibration should aim for.");
+        Self::gap(ui);
+        let before = self.settings.targets.clone();
+        let tg = &mut self.settings.targets;
         egui::Grid::new("targets").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
             ui.label("White point");
-            ui.horizontal(|ui| {
-                ui.radio_value(&mut tg.white, White::Daylight, "Daylight");
-                ui.add_enabled(tg.white == White::Daylight, egui::DragValue::new(&mut tg.kelvin).range(3000.0..=10000.0).speed(10.0).suffix(" K"));
-                ui.radio_value(&mut tg.white, White::Native, "Native");
+            choices(ui, |ui| {
+                for (w, name, k) in White::PRESETS {
+                    ui.radio_value(&mut tg.white, w, name).on_hover_text(format!("Daylight, {k:.0} K"));
+                }
+                ui.radio_value(&mut tg.white, White::Native, "Native")
+                    .on_hover_text("The display's own white, with no color temperature correction");
+                with_field(ui, |ui| {
+                    ui.radio_value(&mut tg.white, White::Custom, "Custom");
+                    ui.add_enabled(tg.white == White::Custom, egui::DragValue::new(&mut tg.kelvin).range(3000.0..=10000.0).speed(10.0).suffix(" K"));
+                });
             });
             ui.end_row();
 
-            ui.label("Tone response");
-            ui.horizontal(|ui| {
-                ui.radio_value(&mut tg.tone, Tone::Gamma, "Gamma");
-                ui.add_enabled(tg.tone == Tone::Gamma, egui::DragValue::new(&mut tg.gamma).range(1.0..=3.0).speed(0.01).fixed_decimals(2));
+            ui.label("Tonal response");
+            choices(ui, |ui| {
+                ui.radio_value(&mut tg.tone, Tone::Gamma22, "Gamma 2.2");
+                ui.radio_value(&mut tg.tone, Tone::Gamma18, "Gamma 1.8");
                 ui.radio_value(&mut tg.tone, Tone::Srgb, "sRGB curve");
+                with_field(ui, |ui| {
+                    ui.radio_value(&mut tg.tone, Tone::Gamma, "Custom");
+                    ui.add_enabled(tg.tone == Tone::Gamma, egui::DragValue::new(&mut tg.gamma).range(1.0..=3.0).speed(0.01).fixed_decimals(2));
+                });
             });
             ui.end_row();
 
@@ -864,53 +929,39 @@ impl App {
             ui.end_row();
 
             ui.label("Quality");
-            ui.horizontal(|ui| {
+            choices(ui, |ui| {
                 ui.radio_value(&mut tg.quality, Quality::Low, "Low");
                 ui.radio_value(&mut tg.quality, Quality::Medium, "Medium");
                 ui.radio_value(&mut tg.quality, Quality::High, "High");
             });
             ui.end_row();
         });
-        ui.add_space(8.0);
-        ui.label(RichText::new("Higher quality takes more measurements and longer.").color(t.text_dim));
+        Self::gap(ui);
+        ui.label(RichText::new("A higher quality setting requires more measurements and will take longer to perform.").color(t.text_dim));
+        if self.settings.targets != before {
+            self.save_settings();
+        }
     }
 
     fn page_run(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::get(ui.ctx());
-        ui.heading("Calibrate & profile");
-        ui.add_space(4.0);
+        ui.heading("Measurement");
+        Self::gap(ui);
+        if let Some(inst) = self.inventory.instruments.get(self.instrument) {
+            let correction = self.correction_label().map(|c| format!(", corrected for {c}")).unwrap_or_default();
+            Self::context_line(ui, format!("Instrument: {}{correction}", instrument_name(&inst.description)));
+            Self::gap(ui);
+        }
+        Self::context_line(ui, format!("Goals: {}", self.settings.targets.describe()));
+        Self::gap(ui);
         let running = self.job.is_some();
-        ui.horizontal(|ui| {
-            match self.ready() {
-                Ok(()) if !running => {
-                    if ui.button(RichText::new("Start").font(t.semibold(13.0))).clicked() {
-                        let ctx = ui.ctx().clone();
-                        self.start_calibration(&ctx);
-                    }
-                }
-                Ok(()) => {
-                    if ui.button("Cancel").clicked() {
-                        if let Some((_, job)) = self.job.as_mut() {
-                            job.cancel();
-                        }
-                    }
-                }
-                Err(why) => {
-                    ui.add_enabled(false, egui::Button::new("Start"));
-                    ui.label(RichText::new(why).color(t.caution));
-                }
-            }
-            if let Some((ok, text)) = &self.status {
-                ui.label(RichText::new(text).color(if *ok { t.good } else { t.bad }));
-            }
-        });
-
-        if running {
-            self.progress_bar(ui);
+        if self.job_controls(ui, JobKind::Calibrate) {
+            let ctx = ui.ctx().clone();
+            self.start_calibration(&ctx);
         }
 
         if let Some(outcome) = &self.outcome {
-            ui.add_space(10.0);
+            Self::gap(ui);
             egui::Frame::new().fill(t.inset).corner_radius(4).inner_margin(10).show(ui, |ui| {
                 ui.label(RichText::new("Result").font(t.semibold(13.0)).color(t.text));
                 for line in &outcome.summary {
@@ -926,9 +977,70 @@ impl App {
             }
         }
 
-        ui.add_space(10.0);
-        ui.label(RichText::new("Log").color(t.text_dim));
-        self.log_view(ui, f32::INFINITY);
+        Self::gap(ui);
+        egui::CollapsingHeader::new("Log").default_open(false).show(ui, |ui| self.log_view(ui, f32::INFINITY));
+    }
+
+    /// Start, and while a job runs, what it's waiting for and Cancel.
+    /// Returns true when Start is clicked. Argyll's first prompt asks for
+    /// the instrument to be placed, so a placement message shows from Start
+    /// on, before the prompt itself arrives; Measure answers it. Prompts
+    /// with text of their own (e.g. to retry after a failed reading) show
+    /// it.
+    fn job_controls(&mut self, ui: &mut egui::Ui, kind: JobKind) -> bool {
+        let t = Tokens::get(ui.ctx());
+        let mut start = false;
+        let running = self.job.as_ref().map(|(k, _)| *k);
+        let message = match self.prompt.as_deref() {
+            Some(p) => Some(prompt_message(p)),
+            None if self.placing => Some("Open the measurement device and place it on the box at the center of the screen.".to_string()),
+            None => None,
+        };
+        if running.is_some() {
+            if let Some(m) = &message {
+                ui.label(RichText::new(m).color(t.text));
+                ui.add_space(4.0);
+            }
+        }
+        ui.horizontal(|ui| {
+            match (self.ready(), running) {
+                (Ok(()), None) => {
+                    if ui.button(RichText::new("Start").font(t.semibold(13.0))).clicked() {
+                        start = true;
+                    }
+                }
+                (_, Some(_)) => {
+                    if message.is_some() {
+                        // Before Argyll asks, there's nothing to answer yet
+                        let can = self.prompt.is_some();
+                        if ui.add_enabled(can, egui::Button::new(RichText::new("Measure").font(t.semibold(13.0)))).clicked() {
+                            if let Some((_, job)) = self.job.as_mut() {
+                                job.send_key(' ');
+                            }
+                            self.prompt = None;
+                            self.placing = false;
+                        }
+                    }
+                    if ui.add_enabled(!self.cancelled, egui::Button::new("Cancel")).clicked() {
+                        if let Some((_, job)) = self.job.as_mut() {
+                            job.cancel();
+                        }
+                        self.cancelled = true;
+                    }
+                }
+                (Err(why), None) => {
+                    ui.add_enabled(false, egui::Button::new("Start"));
+                    ui.label(RichText::new(why).color(t.caution));
+                }
+            }
+            if let Some((ok, text)) = &self.status {
+                ui.label(RichText::new(text).color(if *ok { t.good } else { t.bad }));
+            }
+        });
+        if running.is_some_and(|k| k.step() == kind.step()) && message.is_none() {
+            self.progress_bar(ui);
+        }
+        start
     }
 
     fn progress_bar(&self, ui: &mut egui::Ui) {
@@ -946,7 +1058,14 @@ impl App {
     fn log_view(&self, ui: &mut egui::Ui, max_height: f32) {
         let t = Tokens::get(ui.ctx());
         egui::Frame::new().fill(t.field).corner_radius(4).inner_margin(6).show(ui, |ui| {
-            ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).max_height(max_height).show(ui, |ui| {
+            let mut area = ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).max_height(max_height);
+            // A set height, not just a limit: the Verify page sizes its
+            // patch list from what the log took, so a log that took only
+            // the room left would never grow back
+            if max_height.is_finite() {
+                area = area.min_scrolled_height(max_height);
+            }
+            area.show(ui, |ui| {
                 for line in &self.log {
                     ui.label(RichText::new(line).monospace().size(11.5));
                 }
@@ -964,10 +1083,22 @@ impl App {
                 }
             }
         }
+        if let Some(rx) = &self.csv_picker {
+            if let Ok(picked) = rx.try_recv() {
+                self.csv_picker = None;
+                if let (Some(path), Some(o)) = (picked, &self.verify_outcome) {
+                    self.status = Some(match std::fs::write(&path, verify::csv(&verify::patches(), &o.results)) {
+                        Ok(()) => (true, format!("Exported {}", path.display())),
+                        Err(e) => (false, format!("Can't write {}: {e}", path.display())),
+                    });
+                }
+            }
+        }
         let running = self.job.is_some();
         ui.heading("Verify");
+        Self::gap(ui);
         ui.label("Measures 57 patches through a profile's calibration and compares them with what the profile predicts.");
-        ui.add_space(6.0);
+        Self::gap(ui);
 
         ui.horizontal(|ui| {
             ui.label("Profile");
@@ -1002,34 +1133,10 @@ impl App {
             }
         }
 
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            match self.ready() {
-                Ok(()) if !running => {
-                    let can = self.verify_profile.is_some();
-                    if ui.add_enabled(can, egui::Button::new(RichText::new("Start").font(t.semibold(13.0)))).clicked() {
-                        let ctx = ui.ctx().clone();
-                        self.start_verification(&ctx);
-                    }
-                }
-                Ok(()) => {
-                    if ui.button("Cancel").clicked() {
-                        if let Some((_, job)) = self.job.as_mut() {
-                            job.cancel();
-                        }
-                    }
-                }
-                Err(why) => {
-                    ui.add_enabled(false, egui::Button::new("Start"));
-                    ui.label(RichText::new(why).color(t.caution));
-                }
-            }
-            if let Some((ok, text)) = &self.status {
-                ui.label(RichText::new(text).color(if *ok { t.good } else { t.bad }));
-            }
-        });
-        if running {
-            self.progress_bar(ui);
+        Self::gap(ui);
+        if self.verify_profile.is_some() && self.job_controls(ui, JobKind::Verify) {
+            let ctx = ui.ctx().clone();
+            self.start_verification(&ctx);
         }
 
         if let Some(o) = &self.verify_outcome {
@@ -1073,12 +1180,33 @@ impl App {
                     if ui.small_button("Open").clicked() {
                         let _ = std::process::Command::new("xdg-open").arg(&o.report).spawn();
                     }
+                    if ui.add_enabled(self.csv_picker.is_none(), egui::Button::new("Export CSV…").small()).clicked() {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let ctx = ui.ctx().clone();
+                        let dir = o.report.parent().map(PathBuf::from);
+                        let name = o.report.with_extension("csv").file_name().map(|n| n.to_string_lossy().into_owned());
+                        std::thread::spawn(move || {
+                            let mut dialog = rfd::FileDialog::new().set_title("Export patches").add_filter("CSV", &["csv"]);
+                            if let Some(d) = dir {
+                                dialog = dialog.set_directory(d);
+                            }
+                            if let Some(n) = name {
+                                dialog = dialog.set_file_name(n);
+                            }
+                            let _ = tx.send(dialog.save_file());
+                            ctx.request_repaint();
+                        });
+                        self.csv_picker = Some(rx);
+                    }
                 });
             });
 
             ui.add_space(6.0);
             let patches = verify::patches();
-            ScrollArea::vertical().id_salt("verify-patches").max_height(240.0).show(ui, |ui| {
+            // Fill the height the log leaves, so a taller window or a
+            // closed log shows more patches
+            let height = (ui.available_height() - self.verify_log_height - 8.0).max(80.0);
+            ScrollArea::vertical().id_salt("verify-patches").auto_shrink([true, false]).max_height(height).show(ui, |ui| {
                 egui::Grid::new("verify-table").num_columns(4).striped(true).spacing([10.0, 3.0]).show(ui, |ui| {
                     ui.label("");
                     ui.label(RichText::new("Patch").color(t.text_dim));
@@ -1106,45 +1234,14 @@ impl App {
         }
 
         ui.add_space(8.0);
+        let top = ui.cursor().top();
         egui::CollapsingHeader::new("Log").default_open(running).show(ui, |ui| self.log_view(ui, 180.0));
-    }
-
-    fn prompt_dialog(&mut self, ctx: &egui::Context) {
-        let Some(text) = self.prompt.clone() else { return };
-        let t = Tokens::get(ctx);
-        // Argyll's prompts end with key instructions that don't apply here
-        let message = text
-            .replace("Hit Esc or Q to give up, any other key to continue:", "")
-            .replace("Hit Esc or Q to give up, any other key to retry:", "")
-            .trim()
-            .to_string();
-        let mut answer = None;
-        egui::Modal::new(egui::Id::new("argyll-prompt")).show(ctx, |ui| {
-            ui.set_max_width(440.0);
-            ui.horizontal_top(|ui| {
-                ui.add(logo(48.0));
-                ui.add_space(4.0);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("Waiting for you").font(t.semibold(14.0)).color(t.text));
-                    ui.add_space(6.0);
-                    ui.label(if message.is_empty() { "Continue?" } else { message.as_str() });
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button(RichText::new("Continue").font(t.semibold(13.0))).clicked() {
-                            answer = Some(' ');
-                        }
-                        if ui.button("Give up").clicked() {
-                            answer = Some('q');
-                        }
-                    });
-                });
-            });
-        });
-        if let Some(key) = answer {
-            if let Some((_, job)) = self.job.as_mut() {
-                job.send_key(key);
-            }
-            self.prompt = None;
+        // The patch list above was sized from last frame's height, so
+        // redraw once when opening or closing the log changes it
+        let used = ui.min_rect().bottom() - top;
+        if (used - self.verify_log_height).abs() > 0.5 {
+            self.verify_log_height = used;
+            ui.ctx().request_repaint();
         }
     }
 }
@@ -1155,6 +1252,46 @@ fn logo(size: f32) -> egui::Image<'static> {
     egui::Image::new(egui::include_image!("../assets/displaycraft-256.png"))
         .fit_to_exact_size(egui::vec2(size, size))
         .corner_radius((size * 0.14) as u8)
+}
+
+/// A row of choices on the Settings page, spaced apart and wrapped when the
+/// window is too narrow. A choice with its own value field goes in
+/// `with_field`, so the two stay together.
+fn choices(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(22.0, 6.0);
+        add(ui);
+    });
+}
+
+/// A choice and its value field, at normal spacing (child UIs inherit the
+/// wider spacing of `choices`)
+fn with_field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        add(ui);
+    });
+}
+
+/// Argyll's prompt without its key instructions, which don't apply here
+fn prompt_message(text: &str) -> String {
+    let message = text
+        .replace("Hit Esc or Q to give up, any other key to continue:", "")
+        .replace("Hit Esc or Q to give up, any other key to retry:", "")
+        .trim()
+        .to_string();
+    // Argyll prints "Place instrument on test window." as a line of its
+    // own, so the placement prompt arrives as just the key instructions
+    if message.is_empty() { "Place the measurement device on the patch and press Measure to begin.".into() } else { message }
+}
+
+/// "/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)" ->
+/// "X-Rite i1 DisplayPro, ColorMunki Display"
+fn instrument_name(description: &str) -> &str {
+    description
+        .split_once(" (")
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .unwrap_or(description)
 }
 
 /// "Monitor 1, Output eDP-1 (Sharp ...) at 0, 0, ..." -> "eDP-1"
@@ -1214,7 +1351,6 @@ impl eframe::App for App {
             }
         });
         self.preferences(&ctx);
-        self.prompt_dialog(&ctx);
     }
 
     fn on_exit(&mut self) {
@@ -1241,8 +1377,13 @@ mod hardware_tests {
         let deadline = Instant::now() + limit;
         loop {
             harness.step();
-            if let Some(button) = harness.query_by_label("Continue") {
-                button.click();
+            // The buttons only answer once Argyll has asked
+            if harness.state().prompt.is_some() {
+                for label in ["Measure", "Continue"] {
+                    if let Some(button) = harness.query_by_label(label) {
+                        button.click();
+                    }
+                }
             }
             if harness.state().job.is_none() {
                 return;
@@ -1261,10 +1402,10 @@ mod hardware_tests {
         harness.run_steps(2);
         assert!(harness.state().ready().is_ok(), "{:?}", harness.state().ready());
 
-        harness.get_by_label_contains("Calibrate & profile").click();
+        harness.get_by_label_contains("Measure").click();
         harness.run_steps(2);
         // Low quality: the same path as the others, in less time
-        harness.state_mut().targets.quality = Quality::Low;
+        harness.state_mut().settings.targets.quality = Quality::Low;
         harness.get_by_label("Start").click();
         harness.step();
         assert!(harness.state().job.is_some(), "Start didn't launch dispcal: {:?}", harness.state().status);
@@ -1329,11 +1470,70 @@ mod hardware_verify_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::output_name;
+    use super::{instrument_name, output_name};
+
+    #[test]
+    fn instrument_name_from_description() {
+        assert_eq!(instrument_name("/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)"), "X-Rite i1 DisplayPro, ColorMunki Display");
+        assert_eq!(instrument_name("Spyder"), "Spyder");
+    }
 
     #[test]
     fn output_name_from_description() {
         assert_eq!(output_name("Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, width 2560, height 1600"), "eDP-1");
         assert_eq!(output_name("Something else"), "display");
+    }
+}
+
+#[cfg(test)]
+mod page_pictures {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+
+    /// Renders each page to tmp/page-*.png for looking at, with made-up
+    /// verification results.
+    #[test]
+    #[ignore = "needs ArgyllCMS and a GPU; writes pictures to tmp/"]
+    fn render_pages() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let shoot = |step: Step, height: f32, log_open: bool, name: &str| {
+            let mut harness = Harness::builder().with_size(egui::vec2(980.0, height)).wgpu().build_eframe(|cc| App::new(cc));
+            harness.run_steps(2);
+            let app = harness.state_mut();
+            app.step = step;
+            app.settings.targets.white = White::D55;
+            let patches = verify::patches();
+            let results: Vec<verify::PatchResult> = (1..=patches.len())
+                .map(|i| verify::PatchResult { index: i, expected_lab: [50.0, 0.0, 0.0], measured_lab: [50.0, 0.5, 0.5], de: (i % 7) as f64 * 0.4 })
+                .collect();
+            let summary = verify::summarize(&results, |i| i <= 21).unwrap();
+            app.verify_outcome = Some(VerifyOutcome { profile: "/x/eDP-1-test.icc".into(), summary, results, report: "/x/report.txt".into() });
+            app.log = vec!["$ dispread -v ...".into(), "Setting up the instrument".into()];
+            harness.run_steps(2);
+            if name == "spectro-open" {
+                harness.get_by_value("None (use Instrument Default)").click();
+                harness.run_steps(4);
+            }
+            if log_open {
+                harness.get_by_label("Log").click();
+                // Past the opening animation
+                for _ in 0..30 {
+                    harness.step();
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+            harness.render().unwrap().save(dir.join(format!("page-{name}.png"))).unwrap();
+        };
+        shoot(Step::Display, 640.0, false, "display");
+        shoot(Step::Instrument, 640.0, false, "spectro");
+        shoot(Step::Instrument, 640.0, false, "spectro-open");
+        shoot(Step::Targets, 640.0, false, "targets");
+        shoot(Step::Run, 640.0, false, "run");
+        shoot(Step::Verify, 640.0, false, "verify-640");
+        shoot(Step::Verify, 900.0, false, "verify-900");
+        shoot(Step::Verify, 900.0, true, "verify-900-log");
     }
 }

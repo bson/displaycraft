@@ -2,19 +2,27 @@
 
 ## Structure
 
-- `src/main.rs`: eframe window setup (wgpu, Wayland, app id `displaycraft`).
+- `src/main.rs`: eframe window setup (wgpu, Wayland, title `DisplayCraft`,
+  app id `displaycraft`).
 - `src/app.rs`: the workflow UI. A step sidebar (Display, Instrument,
-  Targets, Calibrate & profile) and a page per step. `logic()` drains the
+  Spectro, Settings, Measure, Verify) and a page per step. Internally the
+  steps keep their older names (`Step::Instrument`, `Step::Targets`,
+  `Step::Run`). Pages put one and a half text rows (`App::gap()`) after the
+  heading, the description and the choices. The top bar shows
+  `DisplayCraft <version>` from `CARGO_PKG_VERSION`; the ArgyllCMS version
+  and directory are at the bottom of the sidebar. `logic()` drains the
   running tool's events each frame; `ui()` draws the panels.
 - `src/argyll.rs`: finding and running ArgyllCMS.
-- `src/settings.rs`: preferences (`argyll_bin`, `theme`) in
+- `src/targets.rs`: calibration targets and their dispcal arguments.
+- `src/settings.rs`: preferences (`argyll_bin`, `theme`, `correction`, and
+  the last `targets`, saved whenever they change) in
   `$XDG_CONFIG_HOME/displaycraft/settings.toml`. Unknown or missing fields
   fall back to defaults, and an unreadable file gives the defaults rather
   than stopping the app. Saves write a `.tmp` file, fsync it and rename it
   into place. (`craft-settings` would fit, but it isn't in the pinned
   craft-libs revision.)
 - `src/verify.rs`: the verification patch set, `colverify` parsing,
-  scoring and the text report.
+  scoring, the text report and CSV export.
 - `src/corrections.rs`: finding and labelling `.ccss`/`.ccmx` files.
 - `src/session.rs`: when the window can't open at all (no Wayland), prints
   the reason and tries `kdialog`, then `zenity`.
@@ -29,7 +37,7 @@ kept for the program icon. The UI embeds `assets/displaycraft-256.png`, made
 from it with `magick displaycraft.png -resize 256x256 -strip`, through
 `egui::include_image!` and `egui_extras`'s image loaders (`app::logo()`,
 drawn with rounded corners): above the step ladder (once per window, so not
-again on the pages), and in the Preferences and Argyll prompt dialogs.
+again on the pages), and in the Preferences dialog.
 Regenerate the 256 copy when the source changes.
 
 ## Dependencies
@@ -79,11 +87,44 @@ serial ports for instruments, and runs before the window appears.
   a trailing "continue:". Argyll's `next_con_char`/`poll_con_char`
   `tcgetattr` warnings (stdin isn't a terminal) are printed without line
   breaks, so they're cut out of the middle of lines.
-- Answering a prompt writes one key to stdin: space to continue, `q` to give
-  up. Cancelling sends SIGTERM, so dispwin's signal handler restores the
-  display's color settings.
+- Prompts are answered on the page (`App::job_controls()`), not in a
+  dialog. From Start until the first prompt is answered (`placing`), the page
+  asks for the instrument to be placed at the center of the screen, with
+  Measure (enabled once Argyll has asked) and Cancel. Argyll prints "Place
+  instrument on test window." as a complete line, so its placement prompt
+  arrives as just the key instructions; with those removed it is shown as
+  "Place the measurement device on the patch and press Measure to begin."
+  Prompts with text of their own show it. Measure writes a space to stdin.
+- Cancelling sends SIGTERM, so dispwin's signal handler restores the
+  display's color settings. That handler exits with status 0, so the app
+  records the cancel (`cancelled`) rather than trusting the exit status: a
+  cancelled calibration deletes whatever `.cal`, `.icc` and `.ti3` it had
+  written and the page returns to its start state with no message (a
+  cancelled verification likewise), and a calibration only counts
+  as done when both its `.cal` and `.icc` exist.
 
-## Calibrate & profile
+## Settings (targets)
+
+White point choices are D50, D55 and D65 (daylight 5000, 5500, 6500 K),
+Native (no `-t`) and Custom, a daylight temperature typed in. Tonal
+response is gamma 2.2, gamma 1.8, the sRGB curve or a custom gamma.
+`Targets::kelvin()` and `Targets::gamma_arg()` give the `-t` and `-g`
+values; `Targets::describe()` gives the "Goals" line on the Measurement
+page. Settings shows the chosen display and its backlight correction
+(correction file or display type) under the heading; Measurement shows the
+instrument (the name from Argyll's description, without the USB path) and
+correction. Its log is collapsed by default. Settings rows are spaced out
+and wrap (`choices()`; `with_field()` keeps a Custom choice next to its
+value).
+
+The Spectro page lists instruments by name, with Argyll's full description
+(the USB device) on hover. One dropdown chooses the correction: "None (use
+Instrument Default)", the instrument's built-in display types (`-y`), or
+correction files (`-X`), with Browse for others. Long entries are truncated
+to the field's width and shown whole on hover. The display type choice isn't
+saved; a correction file is.
+
+## Measure
 
 `dispcal -v -d D -c C [-y T] -m -q Q [-t K] -g G|s [-b B] -o base.icc base`.
 `-m` skips the interactive monitor-controls adjustment. `-o` takes an
@@ -92,7 +133,8 @@ otherwise it would consume the output base name that follows. Output goes to
 `$XDG_DATA_HOME/displaycraft/<output>-<YYYYMMDD-HHMMSS>.{cal,icc}`. The
 result shows dispcal's final error summary lines; "Install profile" runs
 `dispwin -d D -I base.icc`, which with the Wayland ArgyllCMS installs it via
-ucmm and points KWin at the installed copy.
+ucmm and points KWin at the installed copy. A successful install makes the
+new profile Verify's choice.
 
 ## Corrections
 
@@ -126,22 +168,20 @@ dispread.
 6. Files go to `$XDG_DATA_HOME/displaycraft/verify/<profile>-verify-<stamp>`
    (`-expected.ti1/.ti3`, `-measured.ti1/.ti3`, `.txt` report).
 
-Measuring needs the Wayland ArgyllCMS's pass-through fix: before it, with
-the profile under test installed, patches went through that profile's own
-tone curves and grays measured far off (a calibration to D55 showed grays at
-x 0.306). With it, the same grays measure neutral at D55.
+The page's patch list fills the height the log section leaves. The log's
+height is measured each frame and used for the next, with a repaint when it
+changes; the open log has a set height (`min_scrolled_height`), otherwise it
+would only take the room left and never grow back. "Export CSV…" saves the
+per-patch results (`verify::csv()`) through rfd's save dialog on its own
+thread, named after the report by default.
 
-What remains after that fix is real: profiles that dispcal -o made for a
-white point far from the panel's native one (D55 here) predict grays
-increasingly redder than their white (a* up to +12 near 85%), and record a
-white point (x 0.311) that isn't the calibrated one. Measured grays are
-neutral, so the calibration is right and the profile's model of the top end
-is wrong. A D65 calibration, close to native, doesn't show it.
-
-Checking the approach: a profile whose own prediction bends from its white
-point target near full drive (white at x 0.3087 against grays at 0.335)
-verified at average 11.6, while a consistent one verified at 1.9 whether the
-backlight was at 70% or 95%.
+Poor results on D55 profiles made earlier came from the Wayland ArgyllCMS
+measuring through KWin's ICC mode, which clips single-channel ramps near
+full drive; dispcal fitted its profile to those readings, so the profile's
+white (x 0.311) disagreed with its grays. ArgyllCMS now measures in KWin's
+sRGB mode and applies calibration curves to the patches itself. A D55
+profile made with that verified Good: average 0.71, maximum 1.96. Profiles
+made before then should be remade.
 
 ## Verified
 
@@ -158,7 +198,7 @@ backlight was at 70% or 95%.
   generic `Other: l = LCD, c = CRT` line merged without duplicates.
 - `app::hardware_tests::calibrate_profile_and_install` (ignored by default;
   run with `cargo test -- --ignored --nocapture`) drives the real app with
-  egui_kittest: Calibrate & profile, Start, Continue at each Argyll prompt,
+  egui_kittest: Measure, Start, then Measure or Continue at each Argyll prompt,
   Install profile. With the i1Display Pro behind a powered hub, Low quality:
   283 s, white point error 0.33 dE, average neutral error 0.39 dE, and KWin
   switched to the installed copy in ICC mode.
@@ -169,5 +209,13 @@ backlight was at 70% or 95%.
   (saturated ColorChecker patches), grayscale 0.72/1.60, in 58 s; a manual
   run of the same pipeline gave 1.90/7.92.
 
+- `app::page_pictures::render_pages` (ignored by default; needs ArgyllCMS
+  and a GPU, through egui_kittest's `wgpu` and `snapshot` dev features)
+  renders Display, Spectro, Settings, Measurement and Verify, with made-up
+  results, to
+  `tmp/page-*.png`: Verify at 640 and 900 points tall and with the log
+  open. The patch list grew with the window and shrank for the open log.
+
 Not yet tested by hand: the Preferences dialog (opening, Browse, Apply), and
-the correction list and Browse on the Instrument page.
+the correction list and Browse on the Spectro page, Export CSV, and the
+Measure and Cancel buttons while measuring.

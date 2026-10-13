@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::targets::Targets;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -16,6 +18,8 @@ pub struct Settings {
     /// Colorimeter correction (.ccss/.ccmx) passed with -X. None means use
     /// the display type instead.
     pub correction: Option<PathBuf>,
+    /// The last calibration targets chosen
+    pub targets: Targets,
 }
 
 fn path() -> Option<PathBuf> {
@@ -62,6 +66,7 @@ mod tests {
             argyll_bin: Some("/opt/argyll-kde-wayland/bin".into()),
             theme: Some("Paper".into()),
             correction: Some("/usr/local/share/ArgyllCMS/WLEDFamily_07Feb11.ccss".into()),
+            targets: Targets { white: crate::targets::White::D55, ..Targets::default() },
         };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);

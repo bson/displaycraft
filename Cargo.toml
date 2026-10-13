@@ -1,0 +1,22 @@
+[package]
+name = "displaycraft"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Display calibration and profiling for KDE Plasma on Wayland, using ArgyllCMS"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "default_fonts"] }
+egui = "0.36"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Native folder picker (XDG portal on Linux), as LightCraft uses
+rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+# Shared ArtCraft UI library: git only, no stability promise, so pinned to
+# the revision LightCraft uses.
+craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "5c874d51eeb3de70e735c8ce87a59a7dedd47675" }
+
+[profile.release]
+lto = "thin"

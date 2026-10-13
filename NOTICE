@@ -1,0 +1,17 @@
+displaycraft
+Copyright (c) 2026 Jan Brittenson.
+Licensed under the MIT License or the Apache License, Version 2.0, at your option
+(LICENSE-MIT, LICENSE-APACHE).
+
+Third-party material
+
+src/theme.rs is adapted from the theme of LightCraft
+(https://github.com/storytold/lightcraft, crates/ui-egui/src/theme.rs, revision 701f78e),
+Copyright (c) 2026 ArtCraft Team and the LightCraft contributors, licensed under the MIT
+License or the Apache License 2.0, at your option. It was modified for this application.
+
+Inter (assets/fonts/Inter-*.ttf), Copyright (c) 2016 The Inter Project Authors, is licensed
+under the SIL Open Font License 1.1. See assets/fonts/OFL-Inter.txt.
+
+displaycraft is not affiliated with or endorsed by ArtCraft. It runs ArgyllCMS
+(https://www.argyllcms.com/) as separate programs; ArgyllCMS is licensed separately.

@@ -175,6 +175,8 @@ struct ProfileRow {
     /// The copy installed for displays
     installed: Option<PathBuf>,
     verdict: Option<String>,
+    /// The output it was made for, when DisplayCraft made it
+    made_for: Option<String>,
 }
 
 impl ProfileRow {
@@ -418,10 +420,7 @@ impl App {
 
     /// The chosen display, e.g. "eDP-1 (Sharp Corporation eDP-1)"
     fn display_label(&self) -> Option<String> {
-        let d = self.inventory.displays.get(self.display)?;
-        // Argyll's description leads with "Monitor 1, Output "
-        let text = d.description.split(", ").find_map(|p| p.strip_prefix("Output ")).unwrap_or(&d.description);
-        Some(text.split(" at ").next().unwrap_or(text).to_string())
+        self.inventory.displays.get(self.display).map(|d| display_name(&d.description))
     }
 
     /// The correction for the display's backlight: a correction file, a
@@ -898,8 +897,24 @@ impl App {
         } else if self.inventory.displays.is_empty() {
             ui.label("No displays found.");
         }
-        for (i, d) in self.inventory.displays.iter().enumerate() {
-            ui.radio_value(&mut self.display, i, &d.description);
+        if let Some(current) = self.inventory.displays.get(self.display) {
+            let mut chosen = self.display;
+            let running = self.job.is_some();
+            ui.add_enabled_ui(!running, |ui| {
+                egui::ComboBox::from_id_salt("display").width(360.0).selected_text(display_name(&current.description)).show_ui(ui, |ui| {
+                    for (i, d) in self.inventory.displays.iter().enumerate() {
+                        ui.selectable_value(&mut chosen, i, display_name(&d.description)).on_hover_text(&d.description);
+                    }
+                });
+            });
+            // Where it is and how big, from the rest of Argyll's description
+            if let Some((_, place)) = current.description.split_once(" at ") {
+                Self::context_line(ui, format!("At {place}"));
+            }
+            if chosen != self.display {
+                self.display = chosen;
+                self.profiles_view = None;
+            }
         }
         Self::gap(ui);
         if ui.add_enabled(self.scan.is_none(), egui::Button::new("Refresh")).clicked() {
@@ -1260,7 +1275,8 @@ impl App {
                 None => {
                     let info = profiles::read(&path).unwrap_or_default();
                     let verdict = verify_dir.as_deref().and_then(|d| profiles::last_verdict(d, &path));
-                    rows.push(ProfileRow { name, info, made: None, installed: None, verdict });
+                    let made_for = made_for(&name).map(str::to_string);
+                    rows.push(ProfileRow { name, info, made: None, installed: None, verdict, made_for });
                     rows.last_mut().unwrap()
                 }
             };
@@ -1276,7 +1292,9 @@ impl App {
                 add(p, true);
             }
         }
-        rows.sort_by(|a, b| b.info.created.cmp(&a.info.created));
+        // This display's first, then the rest, each newest first
+        let other = |r: &ProfileRow| r.made_for.as_deref().is_some_and(|o| o != output);
+        rows.sort_by(|a, b| other(a).cmp(&other(b)).then(b.info.created.cmp(&a.info.created)));
         let color = if output.is_empty() { None } else { profiles::output_color(&output) };
         self.profiles_view = Some(ProfilesView { output, color, rows });
     }
@@ -1285,10 +1303,31 @@ impl App {
         let t = Tokens::get(ui.ctx());
         ui.heading("Profiles");
         Self::gap(ui);
+        let running = self.job.is_some();
+        // The same display as everywhere else; choosing one here changes it
+        // for the other pages too
+        {
+            let mut chosen = self.display;
+            ui.horizontal(|ui| {
+                ui.label("Display");
+                let selected = self.display_label().unwrap_or_else(|| "None found".into());
+                ui.add_enabled_ui(!running, |ui| {
+                    egui::ComboBox::from_id_salt("profiles-display").width(360.0).selected_text(selected).show_ui(ui, |ui| {
+                        for (i, d) in self.inventory.displays.iter().enumerate() {
+                            ui.selectable_value(&mut chosen, i, display_name(&d.description));
+                        }
+                    });
+                });
+            });
+            if chosen != self.display {
+                self.display = chosen;
+                self.profiles_view = None;
+            }
+            Self::gap(ui);
+        }
         if self.profiles_view.is_none() {
             self.refresh_profiles();
         }
-        let running = self.job.is_some();
         let manageable = self.scan.is_none() && self.unsupported().is_none() && !self.inventory.displays.is_empty();
         let Some(view) = &self.profiles_view else { return };
         let active = view.color.as_ref().and_then(|c| c.active()).map(PathBuf::from);
@@ -1301,7 +1340,7 @@ impl App {
         ));
         Self::gap(ui);
         match (&view.color, &active) {
-            (None, _) => ui.label(RichText::new("KWin couldn't be asked which profile this display uses.").color(t.caution)),
+            (None, _) => ui.label(RichText::new(format!("KWin didn't say which profile {} uses.", view.output)).color(t.caution)),
             (Some(_), Some(p)) => ui.label(format!("In use: {}", p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default())),
             (Some(_), None) => ui.label("In use: none. KWin treats the display as sRGB."),
         };
@@ -1324,7 +1363,11 @@ impl App {
                 } else {
                     description.clone()
                 };
+                let elsewhere = row.made_for.as_deref().filter(|o| *o != view.output);
                 let mut where_ = Vec::new();
+                if let Some(o) = elsewhere {
+                    where_.push(format!("Made for {o}, so it describes that display, not this one."));
+                }
                 if let Some(p) = &row.made {
                     where_.push(format!("Made by DisplayCraft: {}", p.display()));
                 }
@@ -1337,6 +1380,9 @@ impl App {
                 ui.allocate_ui_with_layout(egui::vec2(250.0, 18.0), Layout::left_to_right(Align::Center), |ui| {
                     ui.set_min_width(250.0);
                     ui.add(egui::Label::new(text).truncate()).on_hover_text(where_.join("\n"));
+                    if let Some(o) = elsewhere {
+                        ui.label(RichText::new(format!("made for {o}")).small().color(t.caution));
+                    }
                 });
                 ui.label(&row.info.created);
                 match (row.info.white, row.info.cct()) {
@@ -1356,7 +1402,14 @@ impl App {
                 };
                 if in_use {
                     ui.label(RichText::new("In use").color(t.good));
-                } else if ui.add_enabled(manageable && !running, egui::Button::new("Use")).clicked() {
+                } else if ui
+                    .add_enabled(manageable && !running, egui::Button::new("Use"))
+                    .on_hover_text(match elsewhere {
+                        Some(o) => format!("Measured on {o}; on this display its colors will be off"),
+                        None => "Make KWin use this profile for the display".into(),
+                    })
+                    .clicked()
+                {
                     action = Some((JobKind::UseProfile, Some(row.path().to_path_buf())));
                 }
                 match &row.made {
@@ -1746,6 +1799,23 @@ fn with_field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+/// "Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, ..." ->
+/// "eDP-1 (Sharp Corporation eDP-1)"
+fn display_name(description: &str) -> String {
+    let text = description.split(", ").find_map(|p| p.strip_prefix("Output ")).unwrap_or(description);
+    text.split(" at ").next().unwrap_or(text).to_string()
+}
+
+/// The output a DisplayCraft profile was made for, from its name
+/// ("eDP-1-20261012-204053.icc" -> "eDP-1"); None for other profiles
+fn made_for(file_name: &str) -> Option<&str> {
+    let stem = file_name.strip_suffix(".icc")?;
+    let (rest, time) = stem.rsplit_once('-')?;
+    let (output, date) = rest.rsplit_once('-')?;
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(date, 8) && digits(time, 6) && !output.is_empty()).then_some(output)
+}
+
 /// Argyll's prompt without its key instructions, which don't apply here
 fn prompt_message(text: &str) -> String {
     let message = text
@@ -1994,6 +2064,14 @@ mod tests {
     use super::{instrument_name, output_name};
 
     #[test]
+    fn profile_names() {
+        assert_eq!(super::made_for("eDP-1-20261012-204053.icc"), Some("eDP-1"));
+        assert_eq!(super::made_for("HDMI-A-1-20261012-204053.icc"), Some("HDMI-A-1"));
+        assert_eq!(super::made_for("7JXK8-LQ170R1 #1 2024-09-08 15-17 2.2 F-S XYZLUT+MTX.icc"), None);
+        assert_eq!(super::display_name("Monitor 2, Output DP-3 (Dell U2413) at 2560, 0, width 1920, height 1200"), "DP-3 (Dell U2413)");
+    }
+
+    #[test]
     fn instrument_name_from_description() {
         assert_eq!(instrument_name("/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)"), "X-Rite i1 DisplayPro, ColorMunki Display");
         assert_eq!(instrument_name("Spyder"), "Spyder");
@@ -2048,6 +2126,25 @@ mod page_pictures {
                 saved: "/x/eDP-1-report.txt".into(),
             });
             harness.run_steps(2);
+            if name == "profiles-two" {
+                let app = harness.state_mut();
+                app.inventory.displays.push(argyll::Choice {
+                    value: "2".into(),
+                    description: "Monitor 2, Output DP-3 (Dell U2413) at 2560, 0, width 1920, height 1200".into(),
+                });
+                app.display = 1;
+                app.profiles_view = None;
+                harness.run_steps(2);
+            }
+            if name == "display-open" {
+                harness.state_mut().inventory.displays.push(argyll::Choice {
+                    value: "2".into(),
+                    description: "Monitor 2, Output DP-3 (Dell U2413) at 2560, 0, width 1920, height 1200".into(),
+                });
+                harness.run_steps(2);
+                harness.get_by_value("eDP-1 (Sharp Corporation eDP-1)").click();
+                harness.run_steps(4);
+            }
             if name == "spectro-open" {
                 harness.get_by_value("None (use Instrument Default)").click();
                 harness.run_steps(4);
@@ -2063,6 +2160,7 @@ mod page_pictures {
             harness.render().unwrap().save(dir.join(format!("page-{name}.png"))).unwrap();
         };
         shoot(Step::Display, 640.0, false, "display");
+        shoot(Step::Display, 640.0, false, "display-open");
         shoot(Step::Instrument, 640.0, false, "spectro");
         shoot(Step::Instrument, 640.0, false, "spectro-open");
         shoot(Step::Targets, 640.0, false, "targets");
@@ -2072,5 +2170,6 @@ mod page_pictures {
         shoot(Step::Verify, 900.0, true, "verify-900-log");
         shoot(Step::Report, 640.0, false, "report");
         shoot(Step::Profiles, 640.0, false, "profiles");
+        shoot(Step::Profiles, 640.0, false, "profiles-two");
     }
 }

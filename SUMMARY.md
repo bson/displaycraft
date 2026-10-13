@@ -226,7 +226,12 @@ Description, date and white point come from the profile itself: header date
 (UTC, shown local), `desc`/`mluc`, and `wtpt` for v2 profiles only (v4
 ones record D50). dispcal describes its profiles by their output path, so
 those show the file name. The verdict is the newest `verify/` report's.
-What's in use comes from `kscreen-doctor -o` (its JSON leaves out the
+The page opens with a display dropdown; it shares the selection with the
+Display page, which uses a dropdown too (with Argyll's position and size
+under it). This display's profiles come first. A DisplayCraft profile is
+named `<output>-<YYYYMMDD>-<HHMMSS>.icc` (`app::made_for()`), so one made
+for another output is marked "made for X", and Use warns on hover; other
+profiles carry no such mark. What's in use comes from `kscreen-doctor -o` (its JSON leaves out the
 profile source): a profile counts only in ICC mode, since after `dispwin -U`
 KWin keeps the path but switches to sRGB.
 
@@ -284,6 +289,10 @@ KWin keeps the path but switches to sRGB.
   dispcal -R on the same panel gave 242.7, 0.130, 1865:1, 2.23, x 0.3109,
   y 0.3416. Primaries x 0.665/0.203/0.143: 100% of sRGB and Adobe RGB, 94%
   of Display P3.
+- With only the laptop panel here, multiple displays were checked in the
+  rendered pictures with a made-up DP-3 added: the Display dropdown lists
+  both, and choosing DP-3 on Profiles moved the unmarked profile first and
+  marked the eDP-1 ones "made for eDP-1".
 
 Not yet tested by hand: the Preferences dialog (opening, Browse, Apply), and
 the correction list and Browse on the Spectro page, Export CSV, and the

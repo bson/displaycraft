@@ -731,7 +731,11 @@ impl eframe::App for App {
             }
             match self.step {
                 Step::Display => self.page_display(ui),
-                Step::Instrument => self.page_instrument(ui),
+                // The instrument's display type list can be long (21 types
+                // for an i1Display Pro), taller than the default window
+                Step::Instrument => {
+                    ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.page_instrument(ui));
+                }
                 Step::Targets => self.page_targets(ui),
                 Step::Run => self.page_run(ui),
             }

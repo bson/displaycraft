@@ -29,6 +29,10 @@
   button at the foot of the sidebar above the ArgyllCMS version and path.
   Its unapplied state (`Prefs`) lives while the page is open and starts
   over after Apply; the theme applies at once.
+- `src/adjust.rs`: reading dispcal's interactive adjustment (menu, mode,
+  target and live readings).
+- `src/charts.rs`: line, outline, point and bar charts from one description,
+  drawn with egui or written as SVG; the CIE 1931 spectral locus.
 - `src/report.rs`: the display report's patch set, `.ti3` reading and the
   arithmetic (gamma fit, CCT, u'v' gamut coverage).
 - `src/profiles.rs`: reading ICC profiles (description, date, white point),
@@ -114,7 +118,9 @@ new scan replaces a running one, whose result is dropped.
 - `job_controls()` takes where Cancel and the status go. Measurement puts
   Cancel at the foot of the page during a run (a bottom-up layout with the
   page above it, `page_run_body()`); Verify shows the status on its own
-  line between the profile selector and Start; Report keeps both inline.
+  line between the profile selector and Start, and while measuring shows the
+progress bar with Cancel under it, 1.5 rows apart; Report keeps both
+inline.
 - Prompts are answered on the page (`App::job_controls()`), not in a
   dialog. From Start until the first prompt is answered (`placing`), the page
   asks for the instrument to be placed at the center of the screen, with
@@ -219,6 +225,48 @@ colprof's "Profile check complete, peak err = ..., avg err = ..." line.
 ArgyllCMS installs it via ucmm and points KWin at the installed copy. A
 successful install makes the new profile Verify's choice.
 
+## Adjusting the display's controls
+
+Settings has an Adjust… button (Display controls). It runs `dispcal -v -d D
+-c C [-y|-X] [-t K] [-b B] work/adjust` without `-m`, a job of its own
+(`JobKind::Adjust`), and leaves with Exit (8), so nothing is written and
+calibrating stays the Measure step's. After placing the instrument, dispcal
+shows a menu ("Press 1 .. 7"); `adjust::State` follows it from the output
+lines, and the page offers White point (2), White level (3), Black level
+(1) and Black point (4) as buttons, and Finish (8). In a mode, dispcal
+prints an instruction line and a target ("Target Br ..., x ..., y ...", or
+"Initial ..." when native), then rewrites "Current ..." in place about once
+a second until space. Those readings end only with the next "\r", so the
+reader passes the unterminated text on as `Event::Live` and drops it, which
+also keeps them out of the log. The panel shows the level, chromaticity
+with arrows, ΔE (coloured), and which way to turn red, green and blue, the
+one to turn first (dispcal's doubled sign) underlined; Done sends space.
+The Display controls row (label and Adjust…) sits under the Display line,
+above the targets, and the placement prompt, panel and Cancel appear right
+under it, so they stay in view; the page scrolls, and the panel scrolls
+itself into view when it changes between the menu and an adjustment. With
+the panel at the foot of the page, the placement prompt's Measure button
+was scrolled off at the default window height, where egui ignores clicks,
+and dispcal waited at its prompt. The targets are disabled while it runs.
+
+A `Job` dropped while its tool runs is cancelled (SIGTERM). Before that, a
+test that panicked mid-adjustment closed dispcal's input, and dispcal
+exited without restoring KWin's sRGB mode and accuracy preference.
+
+## Graphs
+
+`profiles::curves()` reads the vcgt (table or formula), the TRCs (`curv` or
+`para`) and the colorants, sampled at 256 points. The colorants are adapted
+to D50: ICC v4's `chad` is the adaptation; Argyll's `arts` is the cone space
+the adaptation was done in (not the adaptation), so it's rebuilt with the
+v2 absolute white point; plain Bradford otherwise. For this panel's
+profiles the primaries came out within 0.001 of the Report's measurements.
+The Profiles page shows a profile's calibration curves, tonal response (with
+gamma 2.2 dashed) and gamut when its name is clicked; the Report page shows
+the measured gamut beside the figures. The spectral locus (380-700 nm, 5 nm)
+was computed from the CIE 1931 2° colour matching functions in ArgyllCMS's
+`xicc/xspect.c`.
+
 ## Corrections
 
 `corrections::find()` searches `$XDG_DATA_HOME/ArgyllCMS`, DisplayCAL's
@@ -248,8 +296,15 @@ dispread.
 5. Verdict: Good when the average is at most 1.0 and the maximum at most 3.0,
    Acceptable at 2.0 and 5.0, otherwise Poor. Grayscale figures are patches
    1-21.
-6. Files go to `$XDG_DATA_HOME/displaycraft/verify/<profile>-verify-<stamp>`
-   (`-expected.ti1/.ti3`, `-measured.ti1/.ti3`, `.txt` report).
+6. `verify::html()` writes a self-contained HTML report with SVG charts
+   (ΔE per patch in the verdict colours with the 3 and 5 limits, gray
+   balance from the gray ramp's measured a* and b*, and the profile's gamut,
+   calibration and tonal response), the figures and the patch table with
+   swatches; it prints cleanly. Open shows it. Both reports and the summary
+   card name the profile type (shaper+matrix or LUT, from its `A2B0` tag).
+7. Files go to `$XDG_DATA_HOME/displaycraft/verify/<profile>-verify-<stamp>`
+   (`-expected.ti1/.ti3`, `-measured.ti1/.ti3`, `.txt` and `.html`
+   reports).
 
 The page's patch list fills the height the log section leaves. The log's
 height is measured each frame and used for the next, with a repaint when it
@@ -369,6 +424,16 @@ KWin keeps the path but switches to sRGB.
   - LUT: 563 s; colprof check average 1.80, peak 6.23. Verified Good but
     weaker: average 0.96, maximum 2.95. 100 patches are too few for a LUT.
     Installed briefly, KWin took it in ICC mode with no warnings.
+
+- `app::hardware_adjust_tests::adjust_through_settings` (ignored by
+  default) runs the adjustment from Settings on the real panel: placement,
+  the menu, White point with live readings (target 117.7 cd/m², x 0.3325,
+  y 0.3476 for D55; reading x 0.3124, y 0.3430, ΔE 10.4, "Red up" first,
+  as expected for native white near 6600 K), Done, Finish; KWin was back in
+  ICC mode with its accuracy preference afterwards. The picture is
+  `tmp/page-adjusting.png`.
+- A real verification's HTML report rendered in headless Chrome: charts and
+  table as intended.
 
 Not yet tested by hand: the Preferences page (Browse, Apply), and
 the correction list and Browse on the Spectro page, Export CSV, and the

@@ -1,5 +1,7 @@
+mod adjust;
 mod app;
 mod argyll;
+mod charts;
 mod corrections;
 mod session;
 mod profiles;

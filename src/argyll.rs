@@ -202,6 +202,9 @@ pub enum Event {
     /// The tool waits for a key, e.g. to place the instrument. The text is
     /// the prompt's recent context.
     Prompt(String),
+    /// A reading dispcal rewrites in place during interactive adjustment
+    /// ("/ Current Br 117.34, ..."). Not logged: there's one a second.
+    Live(String),
 }
 
 /// A running Argyll tool.
@@ -267,6 +270,18 @@ impl Job {
     }
 }
 
+/// A job dropped while its tool still runs (DisplayCraft quitting or
+/// panicking mid-measurement) is cancelled. Otherwise the tool only sees its
+/// input close, and dispcal then exits without restoring the display: KWin
+/// was left in sRGB mode with its accuracy preference changed.
+impl Drop for Job {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            self.cancel();
+        }
+    }
+}
+
 /// Noise from Argyll finding that stdin isn't a terminal
 fn is_noise(line: &str) -> bool {
     line.contains("_con_char: tc") && line.contains("on stdin")
@@ -298,6 +313,14 @@ fn read_output(mut stream: Box<dyn Read + Send>, tx: Sender<Event>, wake: impl F
         }
         // A prompt has no newline, so look at what's left over
         let rest = clean(&pending);
+        // A live reading is ended only by the "\r" that starts the next
+        // one, so it's passed on now and dropped
+        if rest.trim_start_matches(['/', '\\', ' ']).starts_with("Current ") {
+            let _ = tx.send(Event::Live(rest));
+            pending.clear();
+            wake();
+            continue;
+        }
         if !prompted && (rest.contains("any other key") || rest.ends_with("continue:")) {
             let _ = tx.send(Event::Prompt(rest));
             pending.clear();

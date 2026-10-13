@@ -6,7 +6,10 @@ It walks through picking a display and instrument (with a colorimeter
 correction if wanted), setting calibration targets, then calibrating, making
 an ICC profile (shaper+matrix or LUT, from a set of measured patches) and
 installing it, and verifying how accurate a profile is.
-Verification results can be exported as CSV. A display report measures
+Before calibrating, a monitor's own white point, brightness and black level
+controls can be adjusted with live readings. Verification gives a printable
+HTML report with charts, and results can be exported as CSV. Profiles can be
+viewed as graphs: calibration curves, tonal response and gamut. A display report measures
 brightness, contrast, gamma, white point and gamut coverage, uncalibrated
 or as calibrated, and a profiles page shows which profile KWin is using
 and switches, removes or deletes them.

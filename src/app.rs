@@ -6,7 +6,9 @@ use std::sync::mpsc::Receiver;
 
 use egui::{Align, Layout, RichText, ScrollArea};
 
+use crate::adjust::{self, Dir};
 use crate::argyll::{self, Event, Inventory, Job};
+use crate::charts;
 use crate::corrections::{self, Correction};
 use crate::profiles;
 use crate::report;
@@ -52,6 +54,9 @@ impl Step {
 enum JobKind {
     /// dispcal, the first of the four stages that make a profile
     Calibrate,
+    /// dispcal's interactive adjustment of the display's controls, from the
+    /// Settings page
+    Adjust,
     /// targen: choose the profile patches
     Targen,
     /// dispread: measure them through the new calibration
@@ -85,6 +90,7 @@ impl JobKind {
             JobKind::Calibrate | JobKind::Targen | JobKind::ProfileRead | JobKind::Colprof | JobKind::Install => Step::Run,
             JobKind::Verify => Step::Verify,
             JobKind::Report => Step::Report,
+            JobKind::Adjust => Step::Targets,
             JobKind::UseProfile | JobKind::StopProfile => Step::Profiles,
         }
     }
@@ -226,6 +232,8 @@ struct ProfileRow {
     verdict: Option<String>,
     /// The output it was made for, when DisplayCraft made it
     made_for: Option<String>,
+    /// For its graphs
+    curves: Option<profiles::Curves>,
 }
 
 impl ProfileRow {
@@ -277,6 +285,11 @@ pub struct App {
     cancelled: bool,
     status: Option<(bool, String)>,
     cal_run: Option<CalRun>,
+    /// dispcal's interactive adjustment, while it runs
+    adjust: adjust::State,
+    /// What the adjustment panel last showed (menu, or a mode), so it's
+    /// scrolled into view when that changes
+    adjust_shown: Option<Option<adjust::Mode>>,
     outcome: Option<Outcome>,
     corrections: Vec<Correction>,
     /// A file chosen with Browse, picked on its own thread
@@ -295,6 +308,8 @@ pub struct App {
     profiles_view: Option<ProfilesView>,
     /// A DisplayCraft profile waiting for the user to confirm deleting it
     delete_confirm: Option<PathBuf>,
+    /// The profile whose graphs the Profiles page shows, by file name
+    profile_details: Option<String>,
 }
 
 impl App {
@@ -332,6 +347,8 @@ impl App {
             cancelled: false,
             status: None,
             cal_run: None,
+            adjust: adjust::State::default(),
+            adjust_shown: None,
             outcome: None,
             corrections: corrections::find(),
             correction_picker: None,
@@ -346,6 +363,7 @@ impl App {
             report_outcome: None,
             profiles_view: None,
             delete_confirm: None,
+            profile_details: None,
         };
         app.refresh_inventory();
         app.verify_profile = app.saved_profiles().into_iter().next();
@@ -451,7 +469,7 @@ impl App {
         let t = &self.settings.targets;
         let mut args: Vec<String> = vec!["-v".into(), "-d".into(), display.value.clone()];
         args.extend(self.instrument_args());
-        // Skip the interactive monitor-controls adjustment
+        // Skip the interactive adjustment, which Settings offers on its own
         args.push("-m".into());
         args.extend(["-q".into(), t.quality.arg().into()]);
         if let Some(k) = t.kelvin() {
@@ -665,9 +683,14 @@ impl App {
             .and_then(|t| report::read_xyz(&t, verify::patches().len(), false))
             .and_then(|m| verify::additivity(&m));
         let lut = profiles::read(&run.profile).is_some_and(|i| i.lut);
-        let report = run.base.with_extension("txt");
-        let text = verify::report(&run.profile, &summary, &verify::patches(), &results, run.correction.as_deref(), additivity);
-        std::fs::write(&report, text).map_err(|e| format!("Can't write the report: {e}"))?;
+        let kind = profile_type(lut);
+        let text = verify::report(&run.profile, kind, &summary, &verify::patches(), &results, run.correction.as_deref(), additivity);
+        std::fs::write(run.base.with_extension("txt"), text).map_err(|e| format!("Can't write the report: {e}"))?;
+        // The HTML one, with charts, is the one Open shows
+        let report = run.base.with_extension("html");
+        let curves = profiles::read_curves(&run.profile);
+        let page = verify::html(&run.profile, kind, &summary, &verify::patches(), &results, run.correction.as_deref(), additivity, curves.as_ref());
+        std::fs::write(&report, page).map_err(|e| format!("Can't write the report: {e}"))?;
         Ok(VerifyOutcome { profile: run.profile, lut, additivity, summary, results, report })
     }
 
@@ -686,8 +709,10 @@ impl App {
         self.log.push(format!("$ {tool} {}", args.join(" ")));
         self.progress = None;
         self.prompt = None;
+        self.adjust = adjust::State::default();
+        self.adjust_shown = None;
         // Jobs that measure start by asking for the instrument to be placed
-        self.placing = matches!(kind, JobKind::Calibrate | JobKind::Verify | JobKind::Report);
+        self.placing = matches!(kind, JobKind::Calibrate | JobKind::Verify | JobKind::Report | JobKind::Adjust);
         self.cancelled = false;
         self.status = None;
         let ctx = ctx.clone();
@@ -703,7 +728,13 @@ impl App {
         let kind = *kind;
         while let Ok(event) = job.events.try_recv() {
             match event {
-                Event::Line(line) => self.log.push(line),
+                Event::Line(line) => {
+                    if kind == JobKind::Adjust {
+                        self.adjust.line(&line);
+                    }
+                    self.log.push(line);
+                }
+                Event::Live(text) => self.adjust.live(&text),
                 Event::Progress(n, m) => self.progress = Some((n, m)),
                 Event::Prompt(text) => self.prompt = Some(text),
             }
@@ -777,6 +808,10 @@ impl App {
                     },
                     _ => self.status = Some((false, "Verification didn't finish. See the log.".into())),
                 }
+            }
+            JobKind::Adjust => {
+                self.adjust = adjust::State::default();
+                self.status = (!ok && !cancelled).then(|| (false, "Adjusting stopped. See the log on the Measure page.".into()));
             }
             JobKind::Report => {
                 let run = self.report_run.take();
@@ -1194,82 +1229,125 @@ impl App {
             let backlight = self.correction_label().unwrap_or_else(|| "instrument default".into());
             Self::context_line(ui, format!("Display: {d}  ·  Backlight correction: {backlight}"));
         }
+        let before = self.settings.targets.clone();
+        let running = self.job.is_some();
+        let ready = self.ready().is_ok();
+        let mut adjust_clicked = false;
+        Self::gap(ui);
+        ui.horizontal(|ui| {
+            ui.label("Display controls");
+            ui.add_space(8.0);
+            if ui
+                .add_enabled(!running && ready, egui::Button::new("Adjust…"))
+                .on_hover_text(
+                    "Set the display's own white point, brightness and black level from its menus while \
+                     DisplayCraft shows how close they are to the targets below. Worth it for monitors with those \
+                     controls; laptop panels usually have only brightness.",
+                )
+                .clicked()
+            {
+                adjust_clicked = true;
+            }
+        });
+        // An adjustment runs right here, near the top, so its buttons are in
+        // view: further down they could be scrolled off, where clicks don't
+        // reach them
+        if self.job.as_ref().is_some_and(|(k, _)| *k == JobKind::Adjust) {
+            // The placement prompt, or nothing once dispcal is past it
+            if self.placing || self.prompt.is_some() || !self.adjust.active() {
+                Self::gap(ui);
+                let controls = ui.scope(|ui| {
+                    self.job_controls(ui, JobKind::Adjust, false, true);
+                });
+                if self.prompt.is_some() && self.adjust_shown.is_none() {
+                    controls.response.scroll_to_me(Some(Align::Max));
+                }
+            }
+            if self.adjust.active() {
+                Self::gap(ui);
+                self.adjust_panel(ui);
+            }
+            Self::gap(ui);
+            self.cancel_button(ui);
+        }
         Self::gap(ui);
         ui.label("What the calibration should aim for.");
         Self::gap(ui);
-        let before = self.settings.targets.clone();
         let tg = &mut self.settings.targets;
-        egui::Grid::new("targets").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-            ui.label("White point");
-            choices(ui, |ui| {
-                for (w, name, k) in White::PRESETS {
-                    ui.radio_value(&mut tg.white, w, name).on_hover_text(format!("Daylight, {k:.0} K"));
-                }
-                ui.radio_value(&mut tg.white, White::Native, "Native")
-                    .on_hover_text("The display's own white, with no color temperature correction");
-                with_field(ui, |ui| {
-                    ui.radio_value(&mut tg.white, White::Custom, "Custom");
-                    ui.add_enabled(tg.white == White::Custom, egui::DragValue::new(&mut tg.kelvin).range(3000.0..=10000.0).speed(10.0).suffix(" K"));
+        // Fixed while adjusting: dispcal took the targets when it started
+        ui.add_enabled_ui(!running, |ui| {
+            egui::Grid::new("targets").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                ui.label("White point");
+                choices(ui, |ui| {
+                    for (w, name, k) in White::PRESETS {
+                        ui.radio_value(&mut tg.white, w, name).on_hover_text(format!("Daylight, {k:.0} K"));
+                    }
+                    ui.radio_value(&mut tg.white, White::Native, "Native")
+                        .on_hover_text("The display's own white, with no color temperature correction");
+                    with_field(ui, |ui| {
+                        ui.radio_value(&mut tg.white, White::Custom, "Custom");
+                        ui.add_enabled(tg.white == White::Custom, egui::DragValue::new(&mut tg.kelvin).range(3000.0..=10000.0).speed(10.0).suffix(" K"));
+                    });
                 });
-            });
-            ui.end_row();
+                ui.end_row();
 
-            ui.label("Tonal response");
-            choices(ui, |ui| {
-                ui.radio_value(&mut tg.tone, Tone::Gamma22, "Gamma 2.2");
-                ui.radio_value(&mut tg.tone, Tone::Gamma18, "Gamma 1.8");
-                ui.radio_value(&mut tg.tone, Tone::Srgb, "sRGB curve");
-                with_field(ui, |ui| {
-                    ui.radio_value(&mut tg.tone, Tone::Gamma, "Custom");
-                    ui.add_enabled(tg.tone == Tone::Gamma, egui::DragValue::new(&mut tg.gamma).range(1.0..=3.0).speed(0.01).fixed_decimals(2));
+                ui.label("Tonal response");
+                choices(ui, |ui| {
+                    ui.radio_value(&mut tg.tone, Tone::Gamma22, "Gamma 2.2");
+                    ui.radio_value(&mut tg.tone, Tone::Gamma18, "Gamma 1.8");
+                    ui.radio_value(&mut tg.tone, Tone::Srgb, "sRGB curve");
+                    with_field(ui, |ui| {
+                        ui.radio_value(&mut tg.tone, Tone::Gamma, "Custom");
+                        ui.add_enabled(tg.tone == Tone::Gamma, egui::DragValue::new(&mut tg.gamma).range(1.0..=3.0).speed(0.01).fixed_decimals(2));
+                    });
                 });
-            });
-            ui.end_row();
+                ui.end_row();
 
-            ui.label("White brightness");
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut tg.set_brightness, "Set to");
-                ui.add_enabled(tg.set_brightness, egui::DragValue::new(&mut tg.brightness).range(40.0..=600.0).speed(1.0).suffix(" cd/m²"));
-                if !tg.set_brightness {
-                    ui.label(RichText::new("(native)").color(t.text_dim));
-                }
-            });
-            ui.end_row();
-
-            ui.label("Quality");
-            choices(ui, |ui| {
-                let low = Targets::allows(Quality::Low, tg.profile);
-                ui.add_enabled_ui(low, |ui| ui.radio_value(&mut tg.quality, Quality::Low, "Low"))
-                    .response
-                    .on_disabled_hover_text("Too few patches for a LUT profile");
-                ui.radio_value(&mut tg.quality, Quality::Medium, "Medium");
-                ui.radio_value(&mut tg.quality, Quality::High, "High");
-            });
-            ui.end_row();
-
-            ui.label("Profile type");
-            choices(ui, |ui| {
-                ui.radio_value(&mut tg.profile, ProfileType::ShaperMatrix, "Shaper+matrix")
-                    .on_hover_text("Smooth, compact, and understood by every application");
-                let lut = Targets::allows(tg.quality, ProfileType::Lut);
-                with_field(ui, |ui| {
-                    ui.add_enabled_ui(lut, |ui| {
-                        ui.radio_value(&mut tg.profile, ProfileType::Lut, "LUT")
-                            .on_hover_text("A table of measured colors, rather than curves and a matrix")
-                    })
-                    .response
-                    .on_disabled_hover_text("Needs Medium or High quality: Low measures too few patches for a LUT");
-                    help(
-                        ui,
-                        "A LUT profile helps most with displays of poor linearity: where the red, green and blue \
-                         channels don't add up exactly, or the white point shifts with brightness, as on many OLEDs. \
-                         On a display that behaves linearly, like most LCDs, Shaper+matrix is as accurate or more so.\n\n\
-                         Try Shaper+matrix first. If Verify finds the result lacking and the display's channels don't \
-                         add up, it suggests making a LUT profile.",
-                    );
+                ui.label("White brightness");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut tg.set_brightness, "Set to");
+                    ui.add_enabled(tg.set_brightness, egui::DragValue::new(&mut tg.brightness).range(40.0..=600.0).speed(1.0).suffix(" cd/m²"));
+                    if !tg.set_brightness {
+                        ui.label(RichText::new("(native)").color(t.text_dim));
+                    }
                 });
+                ui.end_row();
+
+                ui.label("Quality");
+                choices(ui, |ui| {
+                    let low = Targets::allows(Quality::Low, tg.profile);
+                    ui.add_enabled_ui(low, |ui| ui.radio_value(&mut tg.quality, Quality::Low, "Low"))
+                        .response
+                        .on_disabled_hover_text("Too few patches for a LUT profile");
+                    ui.radio_value(&mut tg.quality, Quality::Medium, "Medium");
+                    ui.radio_value(&mut tg.quality, Quality::High, "High");
+                });
+                ui.end_row();
+
+                ui.label("Profile type");
+                choices(ui, |ui| {
+                    ui.radio_value(&mut tg.profile, ProfileType::ShaperMatrix, "Shaper+matrix")
+                        .on_hover_text("Smooth, compact, and understood by every application");
+                    let lut = Targets::allows(tg.quality, ProfileType::Lut);
+                    with_field(ui, |ui| {
+                        ui.add_enabled_ui(lut, |ui| {
+                            ui.radio_value(&mut tg.profile, ProfileType::Lut, "LUT")
+                                .on_hover_text("A table of measured colors, rather than curves and a matrix")
+                        })
+                        .response
+                        .on_disabled_hover_text("Needs Medium or High quality: Low measures too few patches for a LUT");
+                        help(
+                            ui,
+                            "A LUT profile helps most with displays of poor linearity: where the red, green and blue \
+                             channels don't add up exactly, or the white point shifts with brightness, as on many OLEDs. \
+                             On a display that behaves linearly, like most LCDs, Shaper+matrix is as accurate or more so.\n\n\
+                             Try Shaper+matrix first. If Verify finds the result lacking and the display's channels don't \
+                             add up, it suggests making a LUT profile.",
+                        );
+                    });
+                });
+                ui.end_row();
             });
-            ui.end_row();
         });
         Self::gap(ui);
         ui.label(RichText::new(format!(
@@ -1282,6 +1360,36 @@ impl App {
         if self.settings.targets != before {
             self.save_settings();
         }
+
+        if adjust_clicked {
+            let ctx = ui.ctx().clone();
+            self.start_adjust(&ctx);
+        }
+
+    }
+
+    /// Run dispcal's adjustment of the display's own controls, toward the
+    /// white point and brightness targets
+    fn start_adjust(&mut self, ctx: &egui::Context) {
+        let Some(bin) = self.bin.clone() else { return };
+        let Ok(work) = Self::data_dir().map(|d| d.join("work")) else { return };
+        if std::fs::create_dir_all(&work).is_err() {
+            self.status = Some((false, "Can't create the work directory".into()));
+            return;
+        }
+        let display = &self.inventory.displays[self.display];
+        let t = &self.settings.targets;
+        let mut args: Vec<String> = vec!["-v".into(), "-d".into(), display.value.clone()];
+        args.extend(self.instrument_args());
+        if let Some(k) = t.kelvin() {
+            args.extend(["-t".into(), format!("{k:.0}")]);
+        }
+        if t.set_brightness {
+            args.extend(["-b".into(), format!("{:.0}", t.brightness)]);
+        }
+        // Left with Exit, so nothing is written under this name
+        args.push(work.join("adjust").display().to_string());
+        self.start_job(ctx, JobKind::Adjust, &bin, "dispcal", &args);
     }
 
     fn page_run(&mut self, ui: &mut egui::Ui) {
@@ -1314,6 +1422,7 @@ impl App {
             let ctx = ui.ctx().clone();
             self.start_calibration(&ctx);
         }
+
 
         if let Some(outcome) = &self.outcome {
             Self::gap(ui);
@@ -1407,6 +1516,8 @@ impl App {
                 ui.label(RichText::new(&o.title).font(t.semibold(13.0)).color(t.text));
                 ui.add_space(4.0);
                 let value = |ui: &mut egui::Ui, text: String| ui.label(RichText::new(text).color(t.text));
+                ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
                 egui::Grid::new("report").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
                     ui.label("White luminance");
                     value(ui, format!("{:.1} cd/m²", r.white));
@@ -1431,6 +1542,10 @@ impl App {
                 });
                 ui.add_space(4.0);
                 ui.label(RichText::new("Coverage is by area in the CIE 1976 u'v' diagram.").small().color(t.text_dim));
+                });
+                ui.add_space(16.0);
+                charts::gamut(r.primaries, Some(r.white_xy)).show(ui, 300.0, 320.0);
+                });
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("Saved: {}", o.saved.display())).small().color(t.text_dim));
                     if ui.small_button("Open").clicked() {
@@ -1457,7 +1572,8 @@ impl App {
                     let info = profiles::read(&path).unwrap_or_default();
                     let verdict = verify_dir.as_deref().and_then(|d| profiles::last_verdict(d, &path));
                     let made_for = made_for(&name).map(str::to_string);
-                    rows.push(ProfileRow { name, info, made: None, installed: None, verdict, made_for });
+                    let curves = profiles::read_curves(&path);
+                    rows.push(ProfileRow { name, info, made: None, installed: None, verdict, made_for, curves });
                     rows.last_mut().unwrap()
                 }
             };
@@ -1529,6 +1645,8 @@ impl App {
 
         let mut action: Option<(JobKind, Option<PathBuf>)> = None;
         let mut delete: Option<PathBuf> = None;
+        // A click on a name: Some(None) hides the graphs
+        let mut details: Option<Option<String>> = None;
         egui::Grid::new("profiles").num_columns(6).striped(true).spacing([14.0, 6.0]).show(ui, |ui| {
             for h in ["Profile", "Created", "White point", "Verified", "", ""] {
                 ui.label(RichText::new(h).color(t.text_dim));
@@ -1564,7 +1682,13 @@ impl App {
                 let text = RichText::new(title).color(if in_use { t.text } else { t.text_label });
                 ui.allocate_ui_with_layout(egui::vec2(250.0, 18.0), Layout::left_to_right(Align::Center), |ui| {
                     ui.set_min_width(250.0);
-                    ui.add(egui::Label::new(text).truncate()).on_hover_text(where_.join("\n"));
+                    // Clicking the name shows the profile's graphs
+                    let shown = self.profile_details.as_deref() == Some(row.name.as_str());
+                    let text = if shown { text.underline() } else { text };
+                    let hover = format!("{}\nClick for graphs", where_.join("\n"));
+                    if ui.add(egui::Label::new(text).truncate().sense(egui::Sense::click())).on_hover_text(hover).clicked() {
+                        details = if shown { Some(None) } else { Some(Some(row.name.clone())) };
+                    }
                     if let Some(o) = elsewhere {
                         ui.label(RichText::new(format!("made for {o}")).small().color(t.caution));
                     }
@@ -1613,6 +1737,13 @@ impl App {
         if view.rows.is_empty() {
             ui.label(RichText::new("No profiles yet.").color(t.text_dim));
         }
+        if let Some(row) = self.profile_details.as_ref().and_then(|n| view.rows.iter().find(|r| &r.name == n)) {
+            Self::gap(ui);
+            profile_charts(ui, &row.name, row.curves.as_ref());
+        } else if !view.rows.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new("Click a profile's name for its graphs.").small().color(t.text_dim));
+        }
 
         Self::gap(ui);
         ui.horizontal(|ui| {
@@ -1634,11 +1765,15 @@ impl App {
             );
         }
         if running {
+            ui.add_space(6.0);
             self.progress_bar(ui);
         }
 
         if let Some(p) = delete {
             self.delete_confirm = Some(p);
+        }
+        if let Some(d) = details {
+            self.profile_details = d;
         }
         if let (Some((kind, path)), Some(bin)) = (action, self.bin.clone()) {
             let display = self.inventory.displays[self.display].value.clone();
@@ -1689,6 +1824,75 @@ impl App {
             }
             Some(false) => self.delete_confirm = None,
             None => {}
+        }
+    }
+
+    /// dispcal's adjustment menu, or the live readings of one adjustment
+    fn adjust_panel(&mut self, ui: &mut egui::Ui) {
+        let t = Tokens::get(ui.ctx());
+        let mut key = None;
+        let panel = egui::Frame::new().fill(t.inset).corner_radius(4).inner_margin(12).show(ui, |ui| {
+            ui.set_min_width(ui.available_width().min(560.0));
+            match self.adjust.mode {
+                None => {
+                    ui.label(RichText::new("Adjust the display's controls").font(t.semibold(14.0)).color(t.text));
+                    ui.add_space(4.0);
+                    ui.label(
+                        "Use the display's own menus to bring it close to the targets above, so calibration has less \
+                         to correct. Choose what to adjust; readings update about once a second.",
+                    );
+                    Self::gap(ui);
+                    ui.horizontal_wrapped(|ui| {
+                        for mode in adjust::Mode::ALL {
+                            if ui.button(mode.label()).on_hover_text(format!("Turn {}", mode.controls())).clicked() {
+                                key = Some(mode.key());
+                            }
+                        }
+                    });
+                    Self::gap(ui);
+                    if ui.button(RichText::new("Finish").font(t.semibold(13.0))).on_hover_text("Leave the display as adjusted").clicked() {
+                        key = Some('8');
+                    }
+                }
+                Some(mode) => {
+                    ui.label(RichText::new(mode.label()).font(t.semibold(14.0)).color(t.text));
+                    ui.add_space(4.0);
+                    ui.label(format!("Turn {} until the arrows settle on =, then press Done.", mode.controls()));
+                    if let Some(target) = &self.adjust.target {
+                        ui.add_space(4.0);
+                        Self::context_line(ui, adjust::target_text(target));
+                    }
+                    Self::gap(ui);
+                    match &self.adjust.reading {
+                        None => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("Measuring…");
+                            });
+                        }
+                        Some(r) => reading_view(ui, r),
+                    }
+                    Self::gap(ui);
+                    if ui.button(RichText::new("Done").font(t.semibold(13.0))).clicked() {
+                        key = Some(' ');
+                    }
+                }
+            }
+        });
+        // Bring the whole panel, Done included, into view when it changes
+        // between the menu and an adjustment
+        let shown = Some(self.adjust.mode);
+        if self.adjust_shown != shown {
+            self.adjust_shown = shown;
+            panel.response.scroll_to_me(Some(Align::Max));
+        }
+        if let (Some(k), Some((_, job))) = (key, self.job.as_mut()) {
+            job.send_key(k);
+            // Shown as busy until dispcal's next line says what it's doing
+            self.adjust.menu = false;
+            if k == '8' {
+                self.adjust = adjust::State::default();
+            }
         }
     }
 
@@ -1757,18 +1961,18 @@ impl App {
                 ui.label(RichText::new(text).color(if *ok { t.good } else { t.bad }));
             }
         });
-        if running.is_some_and(|k| k.step() == kind.step()) && message.is_none() {
+        if running.is_some_and(|k| k.step() == kind.step()) && message.is_none() && !self.adjust.active() {
             if let Some(stage) = running.and_then(JobKind::stage) {
                 ui.add_space(4.0);
                 ui.label(RichText::new(stage).color(t.text));
             }
+            ui.add_space(6.0);
             self.progress_bar(ui);
         }
         start
     }
 
     fn progress_bar(&self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
         match self.progress {
             Some((n, m)) if m > 0 => {
                 ui.add(egui::ProgressBar::new(n as f32 / m as f32).text(format!("Patch {n} of {m}")));
@@ -1862,9 +2066,22 @@ impl App {
             ui.label(RichText::new(text).color(if *ok { t.good } else { t.bad }));
             Self::gap(ui);
         }
-        if self.verify_profile.is_some() && self.job_controls(ui, JobKind::Verify, true, false) {
-            let ctx = ui.ctx().clone();
-            self.start_verification(&ctx);
+        let measuring = self.job.as_ref().is_some_and(|(k, _)| *k == JobKind::Verify);
+        if !measuring {
+            if self.verify_profile.is_some() && self.job_controls(ui, JobKind::Verify, true, false) {
+                let ctx = ui.ctx().clone();
+                self.start_verification(&ctx);
+            }
+        } else {
+            // While measuring: the placement prompt or the progress, then
+            // Cancel under it
+            if self.placing || self.prompt.is_some() {
+                self.job_controls(ui, JobKind::Verify, false, false);
+            } else {
+                self.progress_bar(ui);
+            }
+            Self::gap(ui);
+            self.cancel_button(ui);
         }
 
         let mut suggest_lut = false;
@@ -1879,7 +2096,8 @@ impl App {
             egui::Frame::new().fill(t.inset).corner_radius(4).inner_margin(10).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(s.verdict.label()).font(t.semibold(18.0)).color(color));
-                    ui.label(RichText::new(o.profile.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).color(t.text_dim));
+                    let name = o.profile.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    ui.label(RichText::new(format!("{name}  ·  {}", profile_type(o.lut))).color(t.text_dim));
                 });
                 egui::Grid::new("verify-summary").num_columns(4).spacing([18.0, 4.0]).show(ui, |ui| {
                     ui.label("Average ΔE00");
@@ -2030,6 +2248,89 @@ fn choices(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+fn profile_type(lut: bool) -> &'static str {
+    if lut { "LUT profile" } else { "shaper+matrix profile" }
+}
+
+/// A profile's graphs: calibration, tonal response and gamut
+fn profile_charts(ui: &mut egui::Ui, name: &str, curves: Option<&profiles::Curves>) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(RichText::new(name.trim_end_matches(".icc")).font(t.semibold(13.0)).color(t.text));
+    let Some(c) = curves else {
+        ui.label(RichText::new("This profile couldn't be read for graphs.").color(t.text_dim));
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(18.0, 12.0);
+        match &c.calibration {
+            Some(cal) => charts::calibration(cal).show(ui, 210.0, 225.0),
+            None => {
+                ui.label(RichText::new("No calibration curves").color(t.text_dim));
+            }
+        }
+        if let Some(tone) = &c.tone {
+            charts::tone(tone).show(ui, 210.0, 225.0);
+        }
+        if let Some(p) = c.primaries {
+            charts::gamut(p, c.white).show(ui, 240.0, 260.0);
+        }
+    });
+}
+
+/// A live adjustment reading: the level, and for color adjustments the
+/// chromaticity, the error and which way to turn each channel
+fn reading_view(ui: &mut egui::Ui, r: &adjust::Reading) {
+    let t = Tokens::get(ui.ctx());
+    let arrow = |d: Dir| match d {
+        Dir::Up => "▲",
+        Dir::Down => "▼",
+        Dir::Hold => "=",
+    };
+    let big = |text: String, color: egui::Color32| RichText::new(text).font(t.semibold(20.0)).color(color);
+    egui::Grid::new("reading").num_columns(2).spacing([20.0, 8.0]).show(ui, |ui| {
+        ui.label("Level");
+        let level = match r.level_dir {
+            Some(d) => format!("{:.1} cd/m²  {}", r.level, arrow(d)),
+            None => format!("{:.1} cd/m²", r.level),
+        };
+        ui.label(big(level, t.text));
+        ui.end_row();
+        if let Some(((x, dx), (y, dy))) = r.xy {
+            ui.label("Chromaticity");
+            ui.label(big(format!("x {x:.4} {}   y {y:.4} {}", arrow(dx), arrow(dy)), t.text));
+            ui.end_row();
+        }
+        if let Some(de) = r.de {
+            ui.label("Off target");
+            let color = if de <= 1.0 { t.good } else if de <= 3.0 { t.caution } else { t.bad };
+            ui.label(big(format!("ΔE {de:.1}"), color));
+            ui.end_row();
+        }
+        if let Some(rgb) = r.rgb {
+            ui.label("Turn");
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 24.0;
+                for ((name, color), (dir, first)) in [("Red", egui::Color32::from_rgb(230, 80, 80)), ("Green", egui::Color32::from_rgb(90, 200, 100)), ("Blue", egui::Color32::from_rgb(100, 140, 255))]
+                    .into_iter()
+                    .zip(rgb)
+                {
+                    let text = format!("{name} {}", match dir {
+                        Dir::Up => "up",
+                        Dir::Down => "down",
+                        Dir::Hold => "=",
+                    });
+                    let mut rt = RichText::new(text).font(t.semibold(if first { 18.0 } else { 15.0 })).color(color);
+                    if first {
+                        rt = rt.underline();
+                    }
+                    ui.label(rt).on_hover_text(if first { "Turn this one first" } else { "" });
+                }
+            });
+            ui.end_row();
+        }
+    });
+}
+
 /// A circled question mark that explains `text` on hover
 fn help(ui: &mut egui::Ui, text: &str) {
     let t = Tokens::get(ui.ctx());
@@ -2144,7 +2445,10 @@ impl eframe::App for App {
                 Step::Instrument => {
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.page_instrument(ui));
                 }
-                Step::Targets => self.page_targets(ui),
+                // The adjustment panel makes it taller than the window
+                Step::Targets => {
+                    ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.page_targets(ui));
+                }
                 Step::Run => self.page_run(ui),
                 Step::Verify => self.page_verify(ui),
                 Step::Report => self.page_report(ui),
@@ -2345,6 +2649,60 @@ mod hardware_report_tests {
 }
 
 #[cfg(test)]
+mod hardware_adjust_tests {
+    use std::time::{Duration, Instant};
+
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+
+    /// Runs the display controls adjustment from the Settings page with the
+    /// real ArgyllCMS and instrument: places the instrument, measures the
+    /// white point for a few readings (pictured in tmp/page-adjusting.png),
+    /// then finishes. Measures only.
+    #[test]
+    #[ignore = "needs ArgyllCMS, an instrument on the screen, and a GPU"]
+    fn adjust_through_settings() {
+        let mut harness = Harness::builder().with_size(egui::vec2(980.0, 640.0)).wgpu().build_eframe(|cc| App::new(cc));
+        super::hardware_tests::wait_for_scan(&mut harness);
+        harness.get_by_label("3  Settings").click();
+        harness.run_steps(2);
+        harness.get_by_label("Adjust…").click();
+        harness.step();
+        assert!(harness.state().job.is_some(), "Adjust didn't start dispcal: {:?}", harness.state().status);
+        let wait = |harness: &mut Harness<'_, App>, what: &str, done: &dyn Fn(&App) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while !done(harness.state()) {
+                assert!(harness.state().job.is_some(), "dispcal ended while waiting for {what}; log:\n{}", harness.state().log.join("\n"));
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::sleep(Duration::from_millis(50));
+                harness.step();
+            }
+            harness.run_steps(2);
+        };
+        wait(&mut harness, "the placement prompt", &|a| a.prompt.is_some());
+        harness.get_by_label("Measure").click();
+        wait(&mut harness, "the menu", &|a| a.adjust.menu);
+        // "White point" is also a row label on the page
+        harness.get_by_role_and_label(egui::accesskit::Role::Button, "White point").click();
+        wait(&mut harness, "readings", &|a| a.adjust.reading.is_some());
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(50));
+            harness.step();
+        }
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp");
+        harness.render().unwrap().save(dir.join("page-adjusting.png")).unwrap();
+        println!("{:?}\n{:?}", harness.state().adjust.target, harness.state().adjust.reading);
+        harness.get_by_label("Done").click();
+        wait(&mut harness, "the menu again", &|a| a.adjust.menu);
+        harness.get_by_label("Finish").click();
+        super::hardware_tests::run_until_idle(&mut harness, Duration::from_secs(60));
+        assert_eq!(harness.state().status, None, "log:\n{}", harness.state().log.join("\n"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{instrument_name, output_name};
 
@@ -2426,6 +2784,16 @@ mod page_pictures {
                 harness.state_mut().start_job(&ctx, JobKind::Calibrate, std::path::Path::new("/usr/bin"), "sleep", &args);
                 harness.run_steps(2);
             }
+            if name == "verify-running" {
+                let ctx = harness.ctx.clone();
+                let args = vec!["30".to_string()];
+                let app = harness.state_mut();
+                app.start_job(&ctx, JobKind::Verify, std::path::Path::new("/usr/bin"), "sleep", &args);
+                // Past the placement prompt, partway through
+                app.placing = false;
+                app.progress = Some((12, 57));
+                harness.run_steps(2);
+            }
             if name == "verify-status" {
                 harness.state_mut().status = Some((true, "Profile installed. KWin now uses it for this display.".into()));
                 harness.run_steps(2);
@@ -2434,6 +2802,10 @@ mod page_pictures {
                 let t = &mut harness.state_mut().settings.targets;
                 t.profile = ProfileType::Lut;
                 t.settle();
+                harness.run_steps(2);
+            }
+            if name == "profiles-graphs" {
+                harness.state_mut().profile_details = Some("eDP-1-20261012-204053.icc".into());
                 harness.run_steps(2);
             }
             if name == "profiles-two" {
@@ -2482,12 +2854,14 @@ mod page_pictures {
         shoot(Step::Run, 640.0, false, "run-running");
         shoot(Step::Preferences, 640.0, false, "preferences");
         shoot(Step::Verify, 640.0, false, "verify-status");
+        shoot(Step::Verify, 640.0, false, "verify-running");
         shoot(Step::Verify, 800.0, false, "verify-suggest");
         shoot(Step::Verify, 640.0, false, "verify-640");
         shoot(Step::Verify, 900.0, false, "verify-900");
         shoot(Step::Verify, 900.0, true, "verify-900-log");
         shoot(Step::Report, 640.0, false, "report");
         shoot(Step::Profiles, 640.0, false, "profiles");
+        shoot(Step::Profiles, 900.0, false, "profiles-graphs");
         shoot(Step::Profiles, 640.0, false, "profiles-two");
     }
 }

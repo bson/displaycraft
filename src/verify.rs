@@ -213,6 +213,7 @@ pub fn swatch(p: &Patch) -> [u8; 3] {
 /// A plain text report.
 pub fn report(
     profile: &Path,
+    kind: &str,
     summary: &Summary,
     patches: &[Patch],
     results: &[PatchResult],
@@ -222,7 +223,7 @@ pub fn report(
     let mut s = String::new();
     let _ = writeln!(s, "DisplayCraft verification report");
     let _ = writeln!(s, "Date: {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
-    let _ = writeln!(s, "Profile: {}", profile.display());
+    let _ = writeln!(s, "Profile: {} ({kind})", profile.display());
     if let Some(c) = correction {
         let _ = writeln!(s, "Correction: {}", c.display());
     }
@@ -253,6 +254,140 @@ pub fn csv(patches: &[Patch], results: &[PatchResult]) -> String {
         let _ = writeln!(s, "{},\"{}\",{:.2},{:.2},{:.2},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
             r.index, p.name.replace('"', "\"\""), p.rgb[0], p.rgb[1], p.rgb[2], e[0], e[1], e[2], m[0], m[1], m[2], r.de);
     }
+    s
+}
+
+/// The same report as HTML, with charts: a self-contained page that prints
+/// cleanly
+#[allow(clippy::too_many_arguments)]
+pub fn html(
+    profile: &Path,
+    kind: &str,
+    summary: &Summary,
+    patches: &[Patch],
+    results: &[PatchResult],
+    correction: Option<&Path>,
+    additivity: Option<f64>,
+    curves: Option<&crate::profiles::Curves>,
+) -> String {
+    use crate::charts::{self, Axis, Chart, Series, Style, escape};
+    let verdict_color = |v: Verdict| match v {
+        Verdict::Good => "#1f9d55",
+        Verdict::Acceptable => "#c98a00",
+        Verdict::Poor => "#cc3b3b",
+    };
+    let de_color = |de: f64| -> [u8; 3] {
+        if de <= GOOD.1 { [60, 170, 100] } else if de <= ACCEPTABLE.1 { [220, 160, 40] } else { [210, 70, 70] }
+    };
+    let name = profile.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut s = String::new();
+    let _ = write!(
+        s,
+        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Verification: {}</title><style>\n\
+         body {{ font-family: sans-serif; margin: 2em auto; max-width: 980px; color: #222; }}\n\
+         h1 {{ font-size: 1.5em; margin-bottom: 0.2em; }} .dim {{ color: #777; }}\n\
+         .verdict {{ font-size: 1.6em; font-weight: 600; }}\n\
+         table {{ border-collapse: collapse; }} td, th {{ padding: 3px 10px; text-align: right; }}\n\
+         th {{ color: #666; font-weight: 600; }} td.name, th.name {{ text-align: left; }}\n\
+         tr:nth-child(even) td {{ background: #f4f4f4; }}\n\
+         .swatch {{ width: 28px; height: 14px; border: 1px solid #999; display: inline-block; }}\n\
+         .charts {{ display: flex; flex-wrap: wrap; gap: 16px; margin: 1.5em 0; }}\n\
+         @media print {{ body {{ margin: 0; }} .charts {{ break-inside: avoid; }} tr {{ break-inside: avoid; }} }}\n\
+         </style></head><body>\n",
+        escape(&name)
+    );
+    let _ = write!(s, "<h1>Verification of {}</h1>\n<p class=\"dim\">{}", escape(&name), chrono::Local::now().format("%Y-%m-%d %H:%M"));
+    let _ = write!(s, " &middot; {}", escape(kind));
+    let _ = write!(s, " &middot; {}", escape(&profile.display().to_string()));
+    if let Some(c) = correction {
+        let _ = write!(s, " &middot; correction {}", escape(&c.display().to_string()));
+    }
+    s.push_str("</p>\n");
+    let _ = write!(
+        s,
+        "<p><span class=\"verdict\" style=\"color:{}\">{}</span> &nbsp; <span class=\"dim\">Good: average &le; {} and maximum &le; {}; Acceptable: &le; {} and &le; {} (CIEDE2000, readings normalised to white)</span></p>\n",
+        verdict_color(summary.verdict), summary.verdict.label(), GOOD.0, GOOD.1, ACCEPTABLE.0, ACCEPTABLE.1
+    );
+    let _ = write!(
+        s,
+        "<table><tr><th class=\"name\">Average</th><td>{:.2}</td><th class=\"name\">Maximum</th><td>{:.2}</td><th class=\"name\">Best 90% average</th><td>{:.2}</td></tr>\n\
+         <tr><th class=\"name\">Grayscale average</th><td>{:.2}</td><th class=\"name\">Grayscale maximum</th><td>{:.2}</td>",
+        summary.average, summary.maximum, summary.best90_average, summary.gray_average, summary.gray_maximum
+    );
+    if let Some(a) = additivity {
+        let _ = write!(s, "<th class=\"name\">Channel additivity</th><td>off by {a:.2}%</td>");
+    }
+    s.push_str("</tr></table>\n<div class=\"charts\">\n");
+
+    // ΔE per patch
+    let max = results.iter().map(|r| r.de).fold(ACCEPTABLE.1, f64::max).ceil();
+    let mut bars = Series::new("", [0, 0, 0], results.iter().map(|r| (r.index as f64, r.de)).collect(), Style::Bars);
+    bars.bar_colors = Some(results.iter().map(|r| de_color(r.de)).collect());
+    let limits = |y: f64, c: [u8; 3]| Series::new("", c, vec![(0.5, y), (results.len() as f64 + 0.5, y)], Style::Line { width: 1.0, dashed: true });
+    let de_chart = Chart {
+        title: "ΔE00 per patch".into(),
+        x: Axis::new("patch", 0.0, ((results.len() as f64 / 10.0).ceil() * 10.0).max(10.0), 10.0),
+        y: Axis::new("", 0.0, max, if max > 10.0 { 2.0 } else { 1.0 }),
+        series: vec![bars, limits(GOOD.1, [60, 170, 100]), limits(ACCEPTABLE.1, [220, 160, 40])],
+        equal_scale: false,
+    };
+    s.push_str(&de_chart.svg(560.0, 260.0));
+
+    // Gray balance: a* and b* of the measured gray ramp (the ColorChecker
+    // neutrals come later in the set, so would run the line backwards)
+    let grays: Vec<(f64, [f64; 3])> = results
+        .iter()
+        .filter_map(|r| {
+            let p = patches.get(r.index - 1)?;
+            p.name.starts_with("Gray ").then_some((p.rgb[0], r.measured_lab))
+        })
+        .collect();
+    if !grays.is_empty() {
+        let lim = grays.iter().flat_map(|(_, l)| [l[1].abs(), l[2].abs()]).fold(2.0, f64::max).ceil();
+        let gray_chart = Chart {
+            title: "Gray balance (measured)".into(),
+            x: Axis::new("gray level %", 0.0, 100.0, 20.0),
+            y: Axis::new("", -lim, lim, if lim > 4.0 { 2.0 } else { 1.0 }),
+            series: vec![
+                Series::new("", [150, 150, 150], vec![(0.0, 0.0), (100.0, 0.0)], Style::Line { width: 1.0, dashed: true }),
+                Series::new("a* (+red, -green)", [210, 70, 90], grays.iter().map(|(v, l)| (*v, l[1])).collect(), Style::Line { width: 1.6, dashed: false }),
+                Series::new("b* (+yellow, -blue)", [70, 110, 220], grays.iter().map(|(v, l)| (*v, l[2])).collect(), Style::Line { width: 1.6, dashed: false }),
+            ],
+            equal_scale: false,
+        };
+        s.push_str(&gray_chart.svg(380.0, 260.0));
+    }
+    if let Some(c) = curves {
+        if let Some(p) = c.primaries {
+            s.push_str(&charts::gamut(p, c.white).svg(320.0, 340.0));
+        }
+        if let Some(cal) = &c.calibration {
+            s.push_str(&charts::calibration(cal).svg(300.0, 300.0));
+        }
+        if let Some(t) = &c.tone {
+            s.push_str(&charts::tone(t).svg(300.0, 300.0));
+        }
+    }
+    s.push_str("</div>\n");
+
+    s.push_str(
+        "<table><tr><th>#</th><th></th><th class=\"name\">Patch</th><th>Device RGB %</th><th>Expected L*a*b*</th><th>Measured L*a*b*</th><th>&Delta;E00</th></tr>\n",
+    );
+    for r in results {
+        let Some(p) = patches.get(r.index - 1) else { continue };
+        let [cr, cg, cb] = swatch(p);
+        // Values that round to zero print without a sign
+        let one = |v: f64| if v.abs() < 0.05 { 0.0 } else { v };
+        let lab = |l: [f64; 3]| format!("{:.1} {:.1} {:.1}", one(l[0]), one(l[1]), one(l[2]));
+        let c = de_color(r.de);
+        let _ = writeln!(
+            s,
+            "<tr><td>{}</td><td><span class=\"swatch\" style=\"background:rgb({cr},{cg},{cb})\"></span></td><td class=\"name\">{}</td>\
+             <td>{:.0} {:.0} {:.0}</td><td>{}</td><td>{}</td><td style=\"color:rgb({},{},{});font-weight:600\">{:.2}</td></tr>",
+            r.index, escape(&p.name), p.rgb[0], p.rgb[1], p.rgb[2], lab(r.expected_lab), lab(r.measured_lab), c[0], c[1], c[2], r.de
+        );
+    }
+    s.push_str("</table>\n<p class=\"dim\">Made by DisplayCraft with ArgyllCMS (fakeread, dispread, colverify). Swatches show device values, which look about right on a display calibrated near sRGB.</p>\n</body></html>\n");
     s
 }
 
@@ -290,6 +425,9 @@ mod tests {
         assert!((s.maximum - 3.5).abs() < 1e-9);
         assert!((s.gray_maximum - 0.45).abs() < 1e-9);
         assert_eq!(s.verdict, Verdict::Acceptable);
+        let page = html(Path::new("/x/p.icc"), "LUT profile", &s, &patches(), &r, None, Some(0.3), None);
+        assert!(page.starts_with("<!DOCTYPE html>") && page.contains("<svg") && page.contains("Gray 5%") && page.ends_with("</html>\n"));
+        assert!(page.contains("LUT profile"));
 
         // A display whose channels add up, then one whose white falls 5% short
         let p = patches();

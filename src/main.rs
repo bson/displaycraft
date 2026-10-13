@@ -4,6 +4,7 @@ mod argyll;
 mod charts;
 mod corrections;
 mod session;
+mod layout;
 mod profiles;
 mod report;
 mod settings;

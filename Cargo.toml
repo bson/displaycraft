@@ -17,6 +17,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+# kscreen-doctor -j, for the display arrangement
+serde_json = "1"
 # Shared ArtCraft UI library: git only, no stability promise, so pinned to
 # the revision LightCraft uses.
 craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "5c874d51eeb3de70e735c8ce87a59a7dedd47675" }

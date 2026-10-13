@@ -35,6 +35,8 @@
   drawn with egui or written as SVG; the CIE 1931 spectral locus.
 - `src/report.rs`: the display report's patch set, `.ti3` reading and the
   arithmetic (gamma fit, CCT, u'v' gamut coverage).
+- `src/layout.rs`: KDE's arrangement of the outputs, from `kscreen-doctor
+  -j`.
 - `src/profiles.rs`: reading ICC profiles (description, date, white point),
   listing them, the last verification verdict, and KWin's state for an
   output from `kscreen-doctor -o`.
@@ -224,6 +226,29 @@ colprof's "Profile check complete, peak err = ..., avg err = ..." line.
 "Install profile" runs `dispwin -d D -I base.icc`, which with the Wayland
 ArgyllCMS installs it via ucmm and points KWin at the installed copy. A
 successful install makes the new profile Verify's choice.
+
+## Display arrangement
+
+The background scan also runs `kscreen-doctor -j` (`layout::read()`):
+each connected output's position, mode size, scale, rotation, priority
+(1 = primary), enabled and `replicationSource` (mirroring). Positions are
+logical, so sizes are divided by the scale and swapped for a quarter turn
+(rotation 2 or 8). The Display page draws the enabled, unmirrored outputs to
+fit 600 × 190 points (`display_map()`), each labelled with its name, model
+(from Argyll's description), mode size and "primary", the selected one in
+the accent colour. Each is matched to Argyll's display list by output name,
+the same in both; one Argyll doesn't list is marked and can't be chosen.
+Clicking one selects it, the same selection as the dropdown below (and the
+Profiles page). Off or mirroring outputs are listed under the map. The
+rectangles are labelled for accessibility, which is also how tests click
+them. Without kscreen-doctor there's no map, only the dropdown. A monitor
+plugged in later appears after Refresh.
+
+To check with real monitors: plug them in and press Refresh on the Display
+page; the map should match System Settings > Display Configuration
+(positions, portrait monitors, primary); clicking each should select it in
+the dropdown; Measure, Verify and Report should then put their patches on
+that monitor; on Profiles, "In use", Use and Stop should act on it.
 
 ## Adjusting the display's controls
 
@@ -435,7 +460,13 @@ KWin keeps the path but switches to sRGB.
 - A real verification's HTML report rendered in headless Chrome: charts and
   table as intended.
 
+- The arrangement map, rendered with a made-up layout (the panel at 1.25
+  scale, a portrait DP-3 above and to its right, an HDMI output switched
+  off): placed as arranged, HDMI listed as off; clicking eDP-1 and DP-3 in
+  the map selected each.
+
 Not yet tested by hand: the Preferences page (Browse, Apply), and
 the correction list and Browse on the Spectro page, Export CSV, and the
 Measure and Cancel buttons while measuring, the Profiles page's buttons
-(clicked), and deleting a profile.
+(clicked), and deleting a profile, and anything with a second monitor
+attached.

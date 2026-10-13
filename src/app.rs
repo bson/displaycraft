@@ -10,6 +10,7 @@ use crate::adjust::{self, Dir};
 use crate::argyll::{self, Event, Inventory, Job};
 use crate::charts;
 use crate::corrections::{self, Correction};
+use crate::layout;
 use crate::profiles;
 use crate::report;
 use crate::settings::Settings;
@@ -253,12 +254,16 @@ struct ProfilesView {
 struct Scan {
     platform: argyll::Platform,
     inventory: Result<Inventory, String>,
+    /// KDE's arrangement of the outputs, if kscreen-doctor answered
+    layout: Vec<layout::Output>,
 }
 
 pub struct App {
     ctx: egui::Context,
     /// A scan for displays and instruments in progress
     scan: Option<Receiver<Scan>>,
+    /// How KDE arranges the outputs, for the Display page's map
+    layout: Vec<layout::Output>,
     settings: Settings,
     prefs: Option<Prefs>,
     bin: Option<PathBuf>,
@@ -328,6 +333,7 @@ impl App {
         let mut app = App {
             ctx: cc.egui_ctx.clone(),
             scan: None,
+            layout: Vec::new(),
             bin: argyll::find_bin_dir(settings.argyll_bin.as_deref()),
             settings,
             prefs: None,
@@ -393,7 +399,8 @@ impl App {
                     format!("Couldn't run dispcal in {}: {e}. Check the ArgyllCMS directory in Preferences.", bin.display())
                 }),
             };
-            let _ = tx.send(Scan { platform, inventory });
+            let layout = layout::read().unwrap_or_default();
+            let _ = tx.send(Scan { platform, inventory, layout });
             ctx.request_repaint();
         });
         self.scan = Some(rx);
@@ -405,6 +412,7 @@ impl App {
         let Ok(scan) = rx.try_recv() else { return };
         self.scan = None;
         self.platform = Some(scan.platform);
+        self.layout = scan.layout;
         match scan.inventory {
             Ok(inv) => {
                 self.display = self.display.min(inv.displays.len().saturating_sub(1));
@@ -1066,6 +1074,15 @@ impl App {
         } else if self.inventory.displays.is_empty() {
             ui.label("No displays found.");
         }
+        if !self.layout.is_empty() && !self.inventory.displays.is_empty() {
+            if let Some(i) = self.display_map(ui) {
+                if i != self.display && self.job.is_none() {
+                    self.display = i;
+                    self.profiles_view = None;
+                }
+            }
+            Self::gap(ui);
+        }
         if let Some(current) = self.inventory.displays.get(self.display) {
             let mut chosen = self.display;
             let running = self.job.is_some();
@@ -1089,6 +1106,91 @@ impl App {
         if ui.add_enabled(self.scan.is_none(), egui::Button::new("Refresh")).clicked() {
             self.refresh_inventory();
         }
+    }
+
+    /// The outputs as KDE arranges them; clicking one returns its index in
+    /// Argyll's display list. Outputs Argyll doesn't list, or that are off
+    /// or mirroring another, are drawn dimmed and can't be chosen.
+    fn display_map(&self, ui: &mut egui::Ui) -> Option<usize> {
+        let t = Tokens::get(ui.ctx());
+        let shown: Vec<&layout::Output> = self.layout.iter().filter(|o| o.enabled && !o.mirrored).collect();
+        if shown.is_empty() {
+            return None;
+        }
+        let (x0, y0) = shown.iter().fold((f64::MAX, f64::MAX), |(x, y), o| (x.min(o.x), y.min(o.y)));
+        let (x1, y1) = shown.iter().fold((f64::MIN, f64::MIN), |(x, y), o| (x.max(o.x + o.width), y.max(o.y + o.height)));
+        let width = ui.available_width().min(600.0);
+        let height = 190.0_f32;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let scale = ((width - 8.0) as f64 / (x1 - x0)).min((height - 8.0) as f64 / (y1 - y0));
+        // Centered in the area
+        let (dw, dh) = (((x1 - x0) * scale) as f32, ((y1 - y0) * scale) as f32);
+        let origin = rect.min + egui::vec2((width - dw) / 2.0, (height - dh) / 2.0);
+        let painter = ui.painter_at(rect);
+        let selected_name = self.inventory.displays.get(self.display).map(|d| output_name(&d.description));
+        let mut clicked = None;
+        for o in shown {
+            let r = egui::Rect::from_min_size(
+                origin + egui::vec2(((o.x - x0) * scale) as f32, ((o.y - y0) * scale) as f32),
+                egui::vec2((o.width * scale) as f32, (o.height * scale) as f32),
+            )
+            .shrink(3.0);
+            let index = self.inventory.displays.iter().position(|d| output_name(&d.description) == o.name);
+            let response = ui.interact(r, ui.id().with(("display-map", &o.name)), if index.is_some() { egui::Sense::click() } else { egui::Sense::hover() });
+            // Named for screen readers (and tests), like a button
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, index.is_some(), &o.name));
+            let selected = selected_name.as_deref() == Some(o.name.as_str());
+            let fill = if selected {
+                t.accent.gamma_multiply(0.55)
+            } else if response.hovered() && index.is_some() {
+                t.hover
+            } else {
+                t.field
+            };
+            painter.rect(r, 4, fill, egui::Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { t.accent } else { t.button_border }), egui::StrokeKind::Inside);
+            let model = index
+                .and_then(|i| self.inventory.displays.get(i))
+                .map(|d| display_name(&d.description))
+                .and_then(|n| n.split_once(" (").map(|(_, m)| m.trim_end_matches(')').to_string()))
+                .unwrap_or_default();
+            let mut lines = vec![(o.name.clone(), t.semibold(13.0), t.text)];
+            if !model.is_empty() && model != o.name {
+                lines.push((model, egui::FontId::proportional(11.0), t.text_label));
+            }
+            lines.push((format!("{} × {}", o.pixels.0, o.pixels.1), egui::FontId::proportional(11.0), t.text_dim));
+            if o.primary {
+                lines.push(("primary".into(), egui::FontId::proportional(10.5), t.text_dim));
+            }
+            if index.is_none() {
+                lines.push(("not available to ArgyllCMS".into(), egui::FontId::proportional(10.5), t.caution));
+            }
+            let total: f32 = lines.iter().map(|(_, f, _)| f.size + 3.0).sum();
+            let mut y = r.center().y - total / 2.0;
+            for (text, font, color) in lines {
+                let size = font.size;
+                // Clipped to the rectangle, so a small output's labels don't spill
+                ui.painter_at(r).text(egui::pos2(r.center().x, y), egui::Align2::CENTER_TOP, text, font, color);
+                y += size + 3.0;
+            }
+            if response.clicked() {
+                clicked = index;
+            }
+            response.on_hover_text(match index {
+                Some(_) => format!("{} at {}, {}", o.name, o.x, o.y),
+                None => format!("{} isn't in ArgyllCMS's display list", o.name),
+            });
+        }
+        // Outputs that are connected but not shown
+        let hidden: Vec<String> = self
+            .layout
+            .iter()
+            .filter(|o| !o.enabled || o.mirrored)
+            .map(|o| format!("{} ({})", o.name, if o.mirrored { "mirroring" } else { "off" }))
+            .collect();
+        if !hidden.is_empty() {
+            Self::context_line(ui, format!("Also connected: {}", hidden.join(", ")));
+        }
+        clicked
     }
 
     fn page_instrument(&mut self, ui: &mut egui::Ui) {
@@ -2818,6 +2920,29 @@ mod page_pictures {
                 app.profiles_view = None;
                 harness.run_steps(2);
             }
+            if name == "display-three" {
+                let app = harness.state_mut();
+                app.inventory.displays.push(argyll::Choice {
+                    value: "2".into(),
+                    description: "Monitor 2, Output DP-3 (Dell U2413) at 2048, 0, width 1200, height 1920".into(),
+                });
+                app.layout = layout::parse(
+                    r#"{"outputs": [
+                    {"name": "eDP-1", "enabled": true, "connected": true, "pos": {"x": 0, "y": 360}, "size": {"width": 2560, "height": 1600}, "scale": 1.25, "rotation": 1, "priority": 1, "replicationSource": 0},
+                    {"name": "DP-3", "enabled": true, "connected": true, "pos": {"x": 2048, "y": 0}, "size": {"width": 1920, "height": 1200}, "scale": 1, "rotation": 2, "priority": 2, "replicationSource": 0},
+                    {"name": "HDMI-A-1", "enabled": false, "connected": true, "pos": {"x": 0, "y": 0}, "size": {"width": 1920, "height": 1080}, "scale": 1, "rotation": 1, "priority": 0, "replicationSource": 0}]}"#,
+                )
+                .unwrap();
+                app.display = 1;
+                harness.run_steps(2);
+                // Clicking a monitor selects it
+                harness.get_by_label("eDP-1").click();
+                harness.run_steps(2);
+                assert_eq!(harness.state().display, 0, "clicking eDP-1 in the map didn't select it");
+                harness.get_by_label("DP-3").click();
+                harness.run_steps(2);
+                assert_eq!(harness.state().display, 1);
+            }
             if name == "display-open" {
                 harness.state_mut().inventory.displays.push(argyll::Choice {
                     value: "2".into(),
@@ -2845,6 +2970,7 @@ mod page_pictures {
             }
         };
         shoot(Step::Display, 640.0, false, "display");
+        shoot(Step::Display, 640.0, false, "display-three");
         shoot(Step::Display, 640.0, false, "display-open");
         shoot(Step::Instrument, 640.0, false, "spectro");
         shoot(Step::Instrument, 640.0, false, "spectro-open");

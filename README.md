@@ -20,6 +20,9 @@ which shows test patches and loads calibrations through KWin. That build
 also keeps ArgyllCMS's X11 support, used on X11 sessions and, through
 XWayland, on other Wayland desktops.
 
+Its About page links to the source of DisplayCraft and of the modified
+ArgyllCMS it comes with.
+
 DisplayCraft is not affiliated with ArtCraft.
 
 ## Requirements

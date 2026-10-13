@@ -1,8 +1,11 @@
-//! What differs between operating systems in how DisplayCraft finds and
-//! runs the ArgyllCMS it comes with. One implementation of `System` per
-//! operating system, chosen when building; `current()` returns it.
+//! What differs between operating systems: finding and running the
+//! ArgyllCMS DisplayCraft comes with, and opening files and links. One
+//! implementation of `System` per operating system, chosen when building;
+//! `current()` returns it.
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
+use std::process::Command;
 
 use crate::argyll::WindowSystem;
 
@@ -25,6 +28,10 @@ pub trait System: Sync {
 
     /// Why there's no bundled ArgyllCMS
     fn no_bundled(&self) -> &'static str;
+
+    /// Open a file or URL with the desktop's default application, without
+    /// waiting for it
+    fn open(&self, target: &OsStr);
 }
 
 #[cfg(target_os = "linux")]
@@ -53,6 +60,10 @@ impl System for Linux {
     fn no_bundled(&self) -> &'static str {
         "There's no bundled ArgyllCMS: DisplayCraft wasn't started from its AppImage"
     }
+
+    fn open(&self, target: &OsStr) {
+        let _ = Command::new("xdg-open").arg(target).spawn();
+    }
 }
 
 /// ArgyllCMS has one way of showing test patches here, so there's nothing
@@ -68,6 +79,14 @@ impl System for Single {
 
     fn no_bundled(&self) -> &'static str {
         "There's no bundled ArgyllCMS: DisplayCraft wasn't started from its installed package"
+    }
+
+    fn open(&self, target: &OsStr) {
+        // start's first quoted argument is a window title, hence the ""
+        #[cfg(windows)]
+        let _ = Command::new("cmd").args(["/C", "start", ""]).arg(target).spawn();
+        #[cfg(not(windows))]
+        let _ = Command::new("open").arg(target).spawn();
     }
 }
 

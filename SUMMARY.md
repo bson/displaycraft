@@ -22,8 +22,9 @@
   missing. Linux: auto, KDE + Wayland and GNOME, KDE + X11, with
   `/opt/argyll-kde-wayland/bin` standing in when run from source. Others
   (Windows, macOS, not yet packaged): one "Bundled ArgyllCMS", from
-  `$DISPLAYCRAFT_ARGYLL_BIN`. Checked to compile for
-  `x86_64-pc-windows-gnu`.
+  `$DISPLAYCRAFT_ARGYLL_BIN`. Also `open()`, for files and links:
+  xdg-open, `cmd /C start ""` on Windows, `open` on macOS. Checked to
+  compile for `x86_64-pc-windows-gnu`.
 - `src/targets.rs`: calibration targets and their dispcal arguments.
 - `src/settings.rs`: preferences (`argyll_bin`, `argyll_variant`, `theme`, `correction`, and
   the last `targets`, saved whenever they change) in
@@ -35,8 +36,16 @@
 - `src/verify.rs`: the verification patch set, `colverify` parsing,
   scoring, the text report and CSV export.
 - `src/corrections.rs`: finding and labelling `.ccss`/`.ccmx` files.
+- About (`Step::About`, `page_about()`): DisplayCraft's version and
+  licence, "Inspired by DisplayCAL by Florian Höch" (linked), ArgyllCMS (the version in use, its licence, and the modified
+  source on GitHub the AGPL calls for), and the theme and font credits.
+  Links open with `System::open()` (xdg-open on Linux), as egui's
+  hyperlinks need a browser feature eframe isn't built with. The report
+  pages' Open buttons use it too. Preferences and About are
+  `Step::always_open()`: reachable, and free of ArgyllCMS warnings, where
+  ArgyllCMS can't run.
 - Preferences is a page (`Step::Preferences`, `page_preferences()`), its
-  button at the foot of the sidebar above the ArgyllCMS version (no path:
+  button at the foot of the sidebar, with About under it, above the ArgyllCMS version (no path:
   the AppImage's mount point changes every run, and Preferences shows the
   choice).
   Its state (`Prefs`) lives while the page is open; changes apply at

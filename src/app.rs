@@ -1,6 +1,7 @@
 //! The calibration workflow: pick a display and instrument, set targets, then
 //! run dispcal to calibrate and make a matrix profile, and install it.
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
@@ -31,6 +32,7 @@ enum Step {
     Profiles,
     /// At the foot of the sidebar, and open even where ArgyllCMS can't run
     Preferences,
+    About,
 }
 
 impl Step {
@@ -49,7 +51,13 @@ impl Step {
             Step::Report => "Report",
             Step::Profiles => "Profiles",
             Step::Preferences => "Preferences",
+            Step::About => "About",
         }
+    }
+
+    /// Pages that open even where ArgyllCMS can't run, without its warnings
+    fn always_open(self) -> bool {
+        matches!(self, Step::Preferences | Step::About)
     }
 }
 
@@ -1084,6 +1092,76 @@ impl App {
         self.prefs = Some(prefs);
     }
 
+    fn page_about(&mut self, ui: &mut egui::Ui) {
+        let t = Tokens::get(ui.ctx());
+        // A link that opens with the desktop's browser: egui's own
+        // hyperlinks need a browser-opening feature eframe isn't built with
+        let link = |ui: &mut egui::Ui, text: &str, url: &str| {
+            if ui.link(text).on_hover_text(url).clicked() {
+                system::current().open(OsStr::new(url));
+            }
+        };
+        let section = |ui: &mut egui::Ui, title: &str| {
+            Self::gap(ui);
+            ui.label(RichText::new(title).font(t.semibold(13.0)).color(t.text));
+            ui.add_space(4.0);
+        };
+
+        ui.horizontal(|ui| {
+            ui.add(logo(72.0));
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                ui.add_space(10.0);
+                ui.label(RichText::new(concat!("DisplayCraft ", env!("CARGO_PKG_VERSION"))).font(t.semibold(18.0)).color(t.text));
+                ui.label(RichText::new("Display calibration and profiling").color(t.text_dim));
+            });
+        });
+
+        section(ui, "DisplayCraft");
+        ui.label("Copyright © 2026 Jan Brittenson. Licensed under the MIT License or the Apache License 2.0, at your option.");
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Inspired by");
+            link(ui, "DisplayCAL", "https://displaycal.net");
+            ui.label("by Florian Höch.");
+        });
+        ui.horizontal(|ui| {
+            link(ui, "Source and releases on GitHub", "https://github.com/bson/displaycraft");
+            ui.label(RichText::new("·").color(t.text_dim));
+            link(ui, "MIT License", "https://github.com/bson/displaycraft/blob/main/LICENSE-MIT");
+            ui.label(RichText::new("·").color(t.text_dim));
+            link(ui, "Apache License 2.0", "https://github.com/bson/displaycraft/blob/main/LICENSE-APACHE");
+        });
+
+        section(ui, "ArgyllCMS");
+        let version = if self.inventory.version.is_empty() { String::new() } else { format!(" {}", self.inventory.version) };
+        ui.label(format!(
+            "Measuring, calibrating and profiling are done by ArgyllCMS{version}, by Graeme W. Gill, which DisplayCraft \
+             runs as separate programs. It's licensed under the GNU Affero General Public License version 3."
+        ));
+        ui.add_space(4.0);
+        ui.label(
+            "The ArgyllCMS that comes with DisplayCraft is modified to run natively on KDE Plasma under Wayland, as \
+             well as on X11, and to reconnect an instrument that stops responding. Its complete source:",
+        );
+        ui.horizontal(|ui| {
+            link(ui, "Modified ArgyllCMS on GitHub", "https://github.com/bson/ArgyllCMS");
+            ui.label(RichText::new("·").color(t.text_dim));
+            link(ui, "GNU AGPL 3.0", "https://github.com/bson/ArgyllCMS/blob/main/License.txt");
+            ui.label(RichText::new("·").color(t.text_dim));
+            link(ui, "ArgyllCMS home page", "https://www.argyllcms.com");
+        });
+
+        section(ui, "Also included");
+        ui.horizontal_wrapped(|ui| {
+            ui.label("The look is adapted from the theme of");
+            link(ui, "LightCraft", "https://github.com/storytold/lightcraft");
+            ui.label("(MIT or Apache 2.0), and text is set in");
+            link(ui, "Inter", "https://rsms.me/inter/");
+            ui.label("(SIL Open Font License 1.1). DisplayCraft is not affiliated with or endorsed by ArtCraft, but is built around its libraries and \
+                      other technologies.");
+        });
+    }
+
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::get(ui.ctx());
         ui.add_space(12.0);
@@ -1120,11 +1198,14 @@ impl App {
                 ui.label(RichText::new(format!("ArgyllCMS {}", self.inventory.version)).small().color(t.text_dim));
             }
             ui.add_space(8.0);
-            let selected = self.step == Step::Preferences;
-            let text = RichText::new(Step::Preferences.label()).color(if selected { t.text } else { t.text_label });
-            let button = egui::Button::new(text).selected(selected).min_size(egui::vec2(ui.available_width(), 30.0));
-            if ui.add(button).clicked() {
-                self.step = Step::Preferences;
+            // Bottom up: About ends up below Preferences
+            for step in [Step::About, Step::Preferences] {
+                let selected = self.step == step;
+                let text = RichText::new(step.label()).color(if selected { t.text } else { t.text_label });
+                let button = egui::Button::new(text).selected(selected).min_size(egui::vec2(ui.available_width(), 30.0));
+                if ui.add(button).clicked() {
+                    self.step = step;
+                }
             }
         });
     }
@@ -1800,7 +1881,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("Saved: {}", o.saved.display())).small().color(t.text_dim));
                     if ui.small_button("Open").clicked() {
-                        let _ = std::process::Command::new("xdg-open").arg(&o.saved).spawn();
+                        system::current().open(o.saved.as_os_str());
                     }
                 });
             });
@@ -2384,7 +2465,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("Report: {}", o.report.display())).small().color(t.text_dim));
                     if ui.small_button("Open").clicked() {
-                        let _ = std::process::Command::new("xdg-open").arg(&o.report).spawn();
+                        system::current().open(o.report.as_os_str());
                     }
                     if ui.add_enabled(self.csv_picker.is_none(), egui::Button::new("Export CSV…").small()).clicked() {
                         let (tx, rx) = std::sync::mpsc::channel();
@@ -2666,7 +2747,7 @@ impl eframe::App for App {
 
         egui::Panel::left("steps").exact_size(t.panel_w).resizable(false).show(ui, |ui| self.sidebar(ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.canvas).inner_margin(16)).show(ui, |ui| {
-            if let Some(why) = self.unsupported().map(str::to_string).filter(|_| self.step != Step::Preferences) {
+            if let Some(why) = self.unsupported().map(str::to_string).filter(|_| !self.step.always_open()) {
                 self.page_unsupported(ui, &why);
                 return;
             }
@@ -2680,7 +2761,7 @@ impl eframe::App for App {
                 Some(Platform::Limited(why)) => Some(format!("Measurements may be wrong here. ArgyllCMS uses {why}.")),
                 _ => None,
             };
-            if let Some(text) = caution.filter(|_| self.step != Step::Preferences) {
+            if let Some(text) = caution.filter(|_| !self.step.always_open()) {
                 ui.label(RichText::new(text).color(t.caution));
                 ui.add_space(8.0);
             }
@@ -2706,6 +2787,9 @@ impl eframe::App for App {
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.page_profiles(ui));
                 }
                 Step::Preferences => self.page_preferences(ui),
+                Step::About => {
+                    ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.page_about(ui));
+                }
             }
         });
     }
@@ -3135,6 +3219,7 @@ mod page_pictures {
         shoot(Step::Run, 640.0, false, "run");
         shoot(Step::Run, 640.0, false, "run-running");
         shoot(Step::Preferences, 640.0, false, "preferences");
+        shoot(Step::About, 640.0, false, "about");
         shoot(Step::Verify, 640.0, false, "verify-status");
         shoot(Step::Verify, 640.0, false, "verify-running");
         shoot(Step::Verify, 800.0, false, "verify-suggest");

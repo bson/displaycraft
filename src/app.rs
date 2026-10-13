@@ -15,6 +15,7 @@ use crate::profiles;
 use crate::report;
 use crate::settings::Settings;
 use crate::targets::{ProfileType, Quality, Targets, Tone, White};
+use crate::usbaccess;
 use crate::verify;
 use crate::theme::{self, ThemeKind, Tokens};
 
@@ -71,6 +72,8 @@ enum JobKind {
     UseProfile,
     /// Uninstall the display's profile, back to sRGB
     StopProfile,
+    /// Install the instrument access rule, with pkexec
+    InstallRule,
 }
 
 impl JobKind {
@@ -92,6 +95,7 @@ impl JobKind {
             JobKind::Verify => Step::Verify,
             JobKind::Report => Step::Report,
             JobKind::Adjust => Step::Targets,
+            JobKind::InstallRule => Step::Instrument,
             JobKind::UseProfile | JobKind::StopProfile => Step::Profiles,
         }
     }
@@ -256,6 +260,8 @@ struct Scan {
     inventory: Result<Inventory, String>,
     /// KDE's arrangement of the outputs, if kscreen-doctor answered
     layout: Vec<layout::Output>,
+    /// Instruments plugged in that the user can't open
+    blocked: Vec<usbaccess::Blocked>,
 }
 
 pub struct App {
@@ -264,6 +270,8 @@ pub struct App {
     scan: Option<Receiver<Scan>>,
     /// How KDE arranges the outputs, for the Display page's map
     layout: Vec<layout::Output>,
+    /// Instruments plugged in that the user can't open
+    blocked: Vec<usbaccess::Blocked>,
     settings: Settings,
     prefs: Option<Prefs>,
     bin: Option<PathBuf>,
@@ -334,6 +342,7 @@ impl App {
             ctx: cc.egui_ctx.clone(),
             scan: None,
             layout: Vec::new(),
+            blocked: Vec::new(),
             bin: argyll::find_bin_dir(settings.argyll_bin.as_deref()),
             settings,
             prefs: None,
@@ -356,7 +365,7 @@ impl App {
             adjust: adjust::State::default(),
             adjust_shown: None,
             outcome: None,
-            corrections: corrections::find(),
+            corrections: Vec::new(),
             correction_picker: None,
             verify_profile: None,
             verify_picker: None,
@@ -371,6 +380,7 @@ impl App {
             delete_confirm: None,
             profile_details: None,
         };
+        app.corrections = corrections::find(app.bin.as_deref());
         app.refresh_inventory();
         app.verify_profile = app.saved_profiles().into_iter().next();
         app
@@ -400,7 +410,8 @@ impl App {
                 }),
             };
             let layout = layout::read().unwrap_or_default();
-            let _ = tx.send(Scan { platform, inventory, layout });
+            let blocked = usbaccess::blocked();
+            let _ = tx.send(Scan { platform, inventory, layout, blocked });
             ctx.request_repaint();
         });
         self.scan = Some(rx);
@@ -413,6 +424,7 @@ impl App {
         self.scan = None;
         self.platform = Some(scan.platform);
         self.layout = scan.layout;
+        self.blocked = scan.blocked;
         match scan.inventory {
             Ok(inv) => {
                 self.display = self.display.min(inv.displays.len().saturating_sub(1));
@@ -817,6 +829,14 @@ impl App {
                     _ => self.status = Some((false, "Verification didn't finish. See the log.".into())),
                 }
             }
+            JobKind::InstallRule => {
+                self.status = Some(if ok {
+                    (true, "Access rule installed. If the instrument still isn't found, unplug it and plug it in again.".into())
+                } else {
+                    (false, "The access rule wasn't installed. See the log on the Measure page.".into())
+                });
+                self.refresh_inventory();
+            }
             JobKind::Adjust => {
                 self.adjust = adjust::State::default();
                 self.status = (!ok && !cancelled).then(|| (false, "Adjusting stopped. See the log on the Measure page.".into()));
@@ -980,6 +1000,7 @@ impl App {
             self.settings.argyll_bin = prefs.chosen();
             self.save_settings();
             self.bin = argyll::find_bin_dir(self.settings.argyll_bin.as_deref());
+            self.corrections = corrections::find(self.bin.as_deref());
             self.refresh_inventory();
         }
         // Applying starts over from the saved settings
@@ -1021,7 +1042,11 @@ impl App {
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(8.0);
             if let Some(bin) = &self.bin {
-                ui.label(RichText::new(bin.display().to_string()).small().color(t.text_dim));
+                // The AppImage's mount point changes every run, so its own
+                // ArgyllCMS is named rather than shown by path
+                let inside = std::env::var_os("APPDIR").is_some_and(|d| bin.starts_with(d));
+                let text = if inside { "inside the AppImage".to_string() } else { bin.display().to_string() };
+                ui.label(RichText::new(text).small().color(t.text_dim)).on_hover_text(bin.display().to_string());
             }
             if !self.inventory.version.is_empty() {
                 ui.label(RichText::new(format!("ArgyllCMS {}", self.inventory.version)).small().color(t.text_dim));
@@ -1207,11 +1232,60 @@ impl App {
         for (i, inst) in self.inventory.instruments.iter().enumerate() {
             ui.radio_value(&mut self.instrument, i, instrument_name(&inst.description)).on_hover_text(&inst.description);
         }
+        if !self.blocked.is_empty() && self.scan.is_none() {
+            Self::gap(ui);
+            self.access_notice(ui);
+        }
         Self::gap(ui);
         if ui.add_enabled(self.scan.is_none(), egui::Button::new("Refresh")).clicked() {
             self.refresh_inventory();
         }
         self.corrections_section(ui);
+    }
+
+    /// Instruments that are plugged in but can't be opened, and the offer to
+    /// install the access rule
+    fn access_notice(&mut self, ui: &mut egui::Ui) {
+        let t = Tokens::get(ui.ctx());
+        let names: Vec<&str> = self.blocked.iter().map(|b| b.name.as_str()).collect();
+        let running = self.job.is_some();
+        let mut install = false;
+        egui::Frame::new().fill(t.inset).corner_radius(4).inner_margin(10).show(ui, |ui| {
+            ui.label(RichText::new(format!("No permission to use: {}", names.join(", "))).color(t.caution));
+            ui.add_space(4.0);
+            ui.label(
+                "The instrument is plugged in, but this system doesn't give you access to it. ArgyllCMS's device \
+                 rule does, for every instrument it supports; installing it needs an administrator password.",
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(!running, egui::Button::new("Install access rule…")).clicked() {
+                    install = true;
+                }
+                ui.label(RichText::new(format!("Installs {} into /etc/udev/rules.d", usbaccess::RULES_NAME)).small().color(t.text_dim));
+            });
+        });
+        if install {
+            self.install_access_rule(ui.ctx());
+        }
+    }
+
+    fn install_access_rule(&mut self, ctx: &egui::Context) {
+        let path = match Self::data_dir().map(|d| d.join("work")) {
+            Ok(dir) if std::fs::create_dir_all(&dir).is_ok() => dir.join(usbaccess::RULES_NAME),
+            _ => {
+                self.status = Some((false, "Can't create the work directory".into()));
+                return;
+            }
+        };
+        // pkexec's root shell copies the rule from where the user wrote it
+        if let Err(e) = std::fs::write(&path, usbaccess::RULES) {
+            self.status = Some((false, format!("Can't write {}: {e}", path.display())));
+            return;
+        }
+        let args = vec!["sh".to_string(), "-c".to_string(), usbaccess::install_command(&path)];
+        let ctx = ctx.clone();
+        self.start_job(&ctx, JobKind::InstallRule, std::path::Path::new("/usr/bin"), "pkexec", &args);
     }
 
     fn corrections_section(&mut self, ui: &mut egui::Ui) {
@@ -2952,6 +3026,13 @@ mod page_pictures {
                 harness.get_by_value("eDP-1 (Sharp Corporation eDP-1)").click();
                 harness.run_steps(4);
             }
+            if name == "spectro-blocked" {
+                // Whatever this machine allows, the real check runs too
+                assert!(harness.state().blocked.is_empty(), "this machine's instrument is blocked: {:?}", harness.state().blocked);
+                harness.state_mut().blocked =
+                    vec![usbaccess::Blocked { name: "i1Display3".into(), node: "/dev/bus/usb/001/017".into() }];
+                harness.run_steps(2);
+            }
             if name == "spectro-open" {
                 harness.get_by_value("None (use Instrument Default)").click();
                 harness.run_steps(4);
@@ -2973,6 +3054,7 @@ mod page_pictures {
         shoot(Step::Display, 640.0, false, "display-three");
         shoot(Step::Display, 640.0, false, "display-open");
         shoot(Step::Instrument, 640.0, false, "spectro");
+        shoot(Step::Instrument, 640.0, false, "spectro-blocked");
         shoot(Step::Instrument, 640.0, false, "spectro-open");
         shoot(Step::Targets, 640.0, false, "targets");
         shoot(Step::Targets, 640.0, false, "targets-lut");

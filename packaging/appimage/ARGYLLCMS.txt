@@ -1,0 +1,14 @@
+ArgyllCMS in this AppImage
+
+The programs in usr/lib/argyll are a modified ArgyllCMS 3.5.0 (by Graeme W.
+Gill, https://www.argyllcms.com), licensed under the GNU Affero General
+Public License version 3 (ArgyllCMS-LICENSE.txt).
+
+It was modified to run natively on Wayland under KDE Plasma (KWin): test
+patches are shown and calibration curves applied through KWin rather than
+X11, KWin's Night Light is held off while measuring, and an instrument that
+stops responding is reconnected.
+
+The complete corresponding source of this modified version is available at:
+
+    https://github.com/bson/ArgyllCMS

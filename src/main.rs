@@ -3,13 +3,14 @@ mod app;
 mod argyll;
 mod charts;
 mod corrections;
-mod session;
 mod layout;
 mod profiles;
 mod report;
+mod session;
 mod settings;
 mod targets;
 mod theme;
+mod usbaccess;
 mod verify;
 
 fn icon() -> egui::IconData {

@@ -250,6 +250,61 @@ page; the map should match System Settings > Display Configuration
 the dropdown; Measure, Verify and Report should then put their patches on
 that monitor; on Profiles, "In use", Use and Stop should act on it.
 
+## Instrument access
+
+`usbaccess::blocked()` looks through /sys/bus/usb/devices for devices
+whose vendor and product IDs appear in ArgyllCMS's udev rule (a copy in
+`assets/udev/55-Argyll.rules`, embedded), and tries opening each one's
+/dev/bus/usb node for reading and writing; opening claims nothing. It runs
+with the background scan. Any that can't be opened get a notice on the
+Spectro page with "Install access rule…": the rule is written to `work/`
+and `pkexec sh -c` installs it into /etc/udev/rules.d, reloads the rules
+and triggers USB "add" events so devices already plugged in get access
+(`usbaccess::install_command()`), then the scan runs again. On this machine
+the instrument is reachable through colord's 69-cd-sensors.rules (group and
+a session ACL), so nothing is shown; the notice was checked in a rendered
+picture, and the install itself hasn't been run.
+
+## Packaging
+
+The Wayland ArgyllCMS is the `argyllcms` submodule, https://github.com/bson/ArgyllCMS
+(HTTPS in `.gitmodules` so anyone can clone it; the local checkout pushes
+over SSH). `ARGYLL_SRC` builds from another checkout instead. A submodule's
+git data is in DisplayCraft's `.git`, so in the container it's reached
+through DisplayCraft's mount; another checkout gets a mount of its own.
+
+`packaging/appimage/build.sh` runs `inside.sh` in an Ubuntu 24.04 container
+(glibc 2.39, the oldest base with Plasma 6.4+; also GitHub's ubuntu-24.04
+runner). The sources are mounted read-only and copied as git sees them
+(tracked and new files, not ignored ones), so host build output, ArgyllCMS's
+in-tree objects in particular, doesn't get linked in. ArgyllCMS is built
+with `-sBUILTIN_TIFF/JPEG/PNG/Z/SSL=true`, as its own release script does,
+leaving only libwayland-client and libdbus as dependencies;
+`-sWLPROTO_SYS/-sWLPROTO_KDE` point it at the host's protocol definitions,
+which are newer than Ubuntu 24.04's packages. DisplayCraft is built with
+rustup's stable Rust. The AppDir holds `usr/bin/displaycraft`, eleven
+ArgyllCMS programs in `usr/lib/argyll/bin` (those DisplayCraft runs, plus
+spotread, ccxxmake, oeminst and iccdump), the vendor corrections in
+`usr/lib/argyll/ref` (found by `corrections::find()` beside the bin folder,
+as for /opt/argyll-kde-wayland), icons, the desktop entry, licences, and
+`ARGYLLCMS.txt`, which describes the modifications and gives the source
+URL the AGPL calls for, with the commit built (and a warning if the
+checkout had uncommitted changes). `AppRun` sets
+`DISPLAYCRAFT_ARGYLL_BIN` to the bundled ArgyllCMS; a directory set in
+Preferences still wins. appimagetool (from the AppImage project's releases)
+runs extracted, as there's no FUSE in the container. Downloads are cached
+in `tmp/appimage-cache`. The container runs with SELinux labelling off
+(`--security-opt label=disable`) rather than relabelling mounts with `:Z`,
+which fails on /usr/share and would relabel the source trees. The sidebar
+says "inside the AppImage" for the bundled ArgyllCMS, whose mount point
+changes every run.
+
+Built so far: 17.5 MB, needing glibc 2.39 at most; the bundled ArgyllCMS
+programs need only libwayland-client and libdbus. Started here with fresh
+settings, it used its own ArgyllCMS (`dispwin -Q` reports the platform as
+supported), listed the panel and drew the arrangement. Not yet run on
+another distribution.
+
 ## Adjusting the display's controls
 
 Settings has an Adjust… button (Display controls). It runs `dispcal -v -d D

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Start DisplayCraft with the ArgyllCMS inside the AppImage. A directory
+# set in Preferences still takes precedence.
+here=$(dirname "$(readlink -f "$0")")
+export DISPLAYCRAFT_ARGYLL_BIN="$here/usr/lib/argyll/bin"
+exec "$here/usr/bin/displaycraft" "$@"

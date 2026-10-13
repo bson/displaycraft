@@ -1,0 +1,3 @@
+[submodule "argyllcms"]
+	path = argyllcms
+	url = https://github.com/bson/ArgyllCMS.git

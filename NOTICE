@@ -15,3 +15,8 @@ under the SIL Open Font License 1.1. See assets/fonts/OFL-Inter.txt.
 
 displaycraft is not affiliated with or endorsed by ArtCraft. It runs ArgyllCMS
 (https://www.argyllcms.com/) as separate programs; ArgyllCMS is licensed separately.
+
+assets/udev/55-Argyll.rules is ArgyllCMS's udev rule for measuring instruments,
+Copyright 2000 - 2023 Graeme W. Gill, under the permissive licence in its header.
+DisplayCraft installs it, on request, where a system doesn't give access to an
+instrument.

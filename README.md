@@ -46,6 +46,23 @@ verification reports in its `verify/` folder, display reports in
 `reports/`, and
 preferences in `~/.config/displaycraft/settings.toml`.
 
+## AppImage
+
+`packaging/appimage/build.sh` builds a single AppImage containing
+DisplayCraft and the Wayland build of ArgyllCMS, in an Ubuntu 24.04
+container (podman or docker), so it runs on any distribution with KDE
+Plasma 6.4 or later. The Wayland ArgyllCMS is the `argyllcms` submodule
+([bson/ArgyllCMS](https://github.com/bson/ArgyllCMS)):
+
+    git submodule update --init
+    packaging/appimage/build.sh
+
+The AppImage is written to `dist/`.
+
+Measuring instruments need a udev rule giving the user access. Where the
+system has none, DisplayCraft offers to install ArgyllCMS's rule, asking
+for an administrator password.
+
 ## License
 
 MIT or Apache-2.0, at your option. See NOTICE for the third-party material

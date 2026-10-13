@@ -25,13 +25,18 @@ impl Correction {
 }
 
 /// Where Argyll and DisplayCAL keep corrections, most specific first.
-fn search_dirs() -> Vec<PathBuf> {
+/// `argyll_bin` adds the `ref` folder beside the ArgyllCMS in use, where
+/// its install (and the AppImage) puts the vendor corrections.
+fn search_dirs(argyll_bin: Option<&Path>) -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let data_home = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| home.as_ref().map(|h| h.join(".local/share")));
     let data_dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
     let mut dirs = Vec::new();
+    if let Some(parent) = argyll_bin.and_then(Path::parent) {
+        dirs.push(parent.join("ref"));
+    }
     if let Some(d) = &data_home {
         dirs.push(d.join("ArgyllCMS"));
         // DisplayCAL downloads the vendor corrections here
@@ -45,10 +50,10 @@ fn search_dirs() -> Vec<PathBuf> {
 }
 
 /// Correction files found in the usual places, one per file name.
-pub fn find() -> Vec<Correction> {
+pub fn find(argyll_bin: Option<&Path>) -> Vec<Correction> {
     let mut found: Vec<Correction> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for dir in search_dirs() {
+    for dir in search_dirs(argyll_bin) {
         // One level of subdirectories, as DisplayCAL sorts them by instrument
         let mut files = list(&dir);
         for sub in subdirs(&dir) {

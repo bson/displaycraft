@@ -750,6 +750,65 @@ impl eframe::App for App {
 }
 
 #[cfg(test)]
+mod hardware_tests {
+    use std::time::{Duration, Instant};
+
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+
+    /// Step the UI until no tool is running, answering Argyll's prompts the
+    /// way a user would.
+    fn run_until_idle(harness: &mut Harness<'_, App>, limit: Duration) {
+        let deadline = Instant::now() + limit;
+        loop {
+            harness.step();
+            if let Some(button) = harness.query_by_label("Continue") {
+                button.click();
+            }
+            if harness.state().job.is_none() {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out; log:\n{}", harness.state().log.join("\n"));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Clicks through a whole calibration with the real ArgyllCMS and
+    /// instrument, then installs the profile.
+    #[test]
+    #[ignore = "needs ArgyllCMS, an instrument on the screen, and installs a profile"]
+    fn calibrate_profile_and_install() {
+        let mut harness = Harness::builder().with_size(egui::vec2(980.0, 640.0)).build_eframe(|cc| App::new(cc));
+        harness.run_steps(2);
+        assert!(harness.state().ready().is_ok(), "{:?}", harness.state().ready());
+
+        harness.get_by_label_contains("Calibrate & profile").click();
+        harness.run_steps(2);
+        // Low quality: the same path as the others, in less time
+        harness.state_mut().targets.quality = Quality::Low;
+        harness.get_by_label("Start").click();
+        harness.step();
+        assert!(harness.state().job.is_some(), "Start didn't launch dispcal: {:?}", harness.state().status);
+
+        run_until_idle(&mut harness, Duration::from_secs(1800));
+        let app = harness.state();
+        let outcome = app.outcome.as_ref().unwrap_or_else(|| panic!("no result; log:\n{}", app.log.join("\n")));
+        println!("{}", outcome.summary.join("\n"));
+        assert!(outcome.cal.is_file() && outcome.icc.is_file());
+
+        harness.run_steps(2);
+        harness.get_by_label("Install profile").click();
+        harness.step();
+        run_until_idle(&mut harness, Duration::from_secs(120));
+        let app = harness.state();
+        assert!(app.outcome.as_ref().is_some_and(|o| o.installed), "install failed; log:\n{}", app.log.join("\n"));
+        println!("installed {}", app.outcome.as_ref().unwrap().icc.display());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::output_name;
 

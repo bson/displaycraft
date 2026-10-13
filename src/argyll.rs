@@ -98,16 +98,10 @@ fn parse_inventory(text: &str) -> Inventory {
                 Section::Displays
             } else if line.starts_with(" -c listno") {
                 Section::Instruments
-            } else if line.starts_with(" -y ") {
-                // "-y l|c   Other: l = LCD, c = CRT" when there's no instrument
-                // specific list; otherwise the list follows on its own lines.
-                if let Some((_, other)) = line.split_once("Other:") {
-                    for item in other.split(',') {
-                        if let Some((v, d)) = item.split_once('=') {
-                            inv.display_types.push(Choice { value: v.trim().to_string(), description: d.trim().to_string() });
-                        }
-                    }
-                }
+            } else if let Some(rest) = line.strip_prefix(" -y ") {
+                // The first entry is on the option line itself, e.g.
+                // " -y n   i1D3: Non-Refresh display [Default,CB1]"
+                push_display_type(&mut inv.display_types, rest);
                 Section::DisplayTypes
             } else {
                 Section::None
@@ -129,20 +123,43 @@ fn parse_inventory(text: &str) -> Inventory {
                     }
                 }
             }
-            Section::DisplayTypes => {
-                // "    l  LCD (Generic)" style lines
-                let trimmed = line.trim();
-                let mut parts = trimmed.splitn(2, char::is_whitespace);
-                if let (Some(v), Some(d)) = (parts.next(), parts.next()) {
-                    if !v.is_empty() && v.len() <= 2 && !d.trim().is_empty() {
-                        inv.display_types.push(Choice { value: v.to_string(), description: d.trim().to_string() });
-                    }
-                }
-            }
+            Section::DisplayTypes => push_display_type(&mut inv.display_types, line),
             Section::None => {}
         }
     }
     inv
+}
+
+/// Add the display type(s) from one line of dispcal's -y list:
+/// "    r|c                i1D3: Refresh display [CB2]", or the generic
+/// "    l|c                Other: l = LCD, c = CRT".
+fn push_display_type(types: &mut Vec<Choice>, line: &str) {
+    let trimmed = line.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let (Some(value), Some(desc)) = (parts.next(), parts.next()) else { return };
+    let desc = desc.trim();
+    if let Some(other) = desc.strip_prefix("Other:") {
+        for item in other.split(',') {
+            if let Some((v, d)) = item.split_once('=') {
+                let v = v.trim();
+                if !types.iter().any(|t| t.value == v) {
+                    types.push(Choice { value: v.to_string(), description: d.trim().to_string() });
+                }
+            }
+        }
+        return;
+    }
+    // Alternatives like "r|c" select the same type; pass the first
+    let value = value.split('|').next().unwrap_or(value);
+    if value.is_empty() || value.len() > 2 || desc.is_empty() {
+        return;
+    }
+    // The list is already for the selected instrument, so drop its name
+    let desc = match desc.split_once(": ") {
+        Some((inst, rest)) if !inst.contains(' ') => rest,
+        _ => desc,
+    };
+    types.push(Choice { value: value.to_string(), description: desc.to_string() });
 }
 
 #[derive(Debug)]
@@ -313,6 +330,24 @@ mod tests {
             Choice { value: "l".into(), description: "LCD".into() },
             Choice { value: "c".into(), description: "CRT".into() },
         ]);
+    }
+
+    #[test]
+    fn parses_instrument_display_types() {
+        let text = r#"Calibrate a Display, Version 3.5.0
+ -y n                  i1D3: Non-Refresh display [Default,CB1]
+    r|c                i1D3: Refresh display [CB2]
+    l                  i1D3: LCD CCFL IPS (CCFL AC EIZO HP with CORRECTION)
+    e                  i1D3: LCD White LED IPS (WLED AC LG Samsung)
+    l|c                Other: l = LCD, c = CRT
+ -t [temp]            White Daylight locus target
+"#;
+        let inv = parse_inventory(text);
+        let values: Vec<&str> = inv.display_types.iter().map(|t| t.value.as_str()).collect();
+        assert_eq!(values, ["n", "r", "l", "e", "c"], "first entry kept, alternatives reduced, generic l not duplicated");
+        assert_eq!(inv.display_types[0].description, "Non-Refresh display [Default,CB1]");
+        assert_eq!(inv.display_types[3].description, "LCD White LED IPS (WLED AC LG Samsung)");
+        assert_eq!(inv.display_types[4].description, "CRT");
     }
 
     #[test]

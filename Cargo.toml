@@ -20,3 +20,7 @@ craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "5c874d51eeb
 
 [profile.release]
 lto = "thin"
+
+[dev-dependencies]
+# Drives the UI in tests by clicking widgets by label, as LightCraft's tests do
+egui_kittest = { version = "0.36", features = ["eframe"] }

@@ -76,6 +76,15 @@ ucmm and points KWin at the installed copy.
 - A saved `argyll_bin` is used; a nonexistent one gives a clear error and
   empty lists.
 
-Not yet tested: the Preferences dialog itself (opening, Browse, Apply), a
-calibration run through the UI, prompts, install, and the instrument-specific
-display type list.
+- `dispcal -?`'s instrument-specific `-y` list (21 types for the
+  i1Display Pro): the first entry on the `-y` line itself, `r|c` style
+  alternatives (the first is passed), the `i1D3: ` prefix dropped, and the
+  generic `Other: l = LCD, c = CRT` line merged without duplicates.
+- `app::hardware_tests::calibrate_profile_and_install` (ignored by default;
+  run with `cargo test -- --ignored --nocapture`) drives the real app with
+  egui_kittest: Calibrate & profile, Start, Continue at each Argyll prompt,
+  Install profile. With the i1Display Pro behind a powered hub, Low quality:
+  283 s, white point error 0.33 dE, average neutral error 0.39 dE, and KWin
+  switched to the installed copy in ICC mode.
+
+Not yet tested by hand: the Preferences dialog (opening, Browse, Apply).

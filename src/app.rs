@@ -204,6 +204,7 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install_fonts(&cc.egui_ctx);
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         let settings = Settings::load();
         let theme = settings
             .theme
@@ -589,6 +590,11 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(logo(36.0));
+                    ui.label(RichText::new("Settings are saved when applied.").color(t.text_dim));
+                });
+                ui.add_space(8.0);
                 ui.label(RichText::new("ArgyllCMS programs").font(t.semibold(13.0)).color(t.text));
                 ui.add_space(2.0);
                 let auto = argyll::auto_bin_dir().map(|d| d.display().to_string()).unwrap_or_else(|| "not found".into());
@@ -671,7 +677,9 @@ impl App {
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::get(ui.ctx());
-        ui.add_space(8.0);
+        ui.add_space(12.0);
+        ui.vertical_centered(|ui| ui.add(logo(112.0)));
+        ui.add_space(10.0);
         let running = self.job.is_some();
         for (i, step) in Step::ALL.into_iter().enumerate() {
             let selected = self.step == step;
@@ -1112,18 +1120,24 @@ impl App {
             .to_string();
         let mut answer = None;
         egui::Modal::new(egui::Id::new("argyll-prompt")).show(ctx, |ui| {
-            ui.set_max_width(380.0);
-            ui.label(RichText::new("Waiting for you").font(t.semibold(14.0)).color(t.text));
-            ui.add_space(6.0);
-            ui.label(if message.is_empty() { "Continue?" } else { message.as_str() });
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button(RichText::new("Continue").font(t.semibold(13.0))).clicked() {
-                    answer = Some(' ');
-                }
-                if ui.button("Give up").clicked() {
-                    answer = Some('q');
-                }
+            ui.set_max_width(440.0);
+            ui.horizontal_top(|ui| {
+                ui.add(logo(48.0));
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Waiting for you").font(t.semibold(14.0)).color(t.text));
+                    ui.add_space(6.0);
+                    ui.label(if message.is_empty() { "Continue?" } else { message.as_str() });
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("Continue").font(t.semibold(13.0))).clicked() {
+                            answer = Some(' ');
+                        }
+                        if ui.button("Give up").clicked() {
+                            answer = Some('q');
+                        }
+                    });
+                });
             });
         });
         if let Some(key) = answer {
@@ -1133,6 +1147,14 @@ impl App {
             self.prompt = None;
         }
     }
+}
+
+/// The DisplayCraft logo, `size` points square. The image has an opaque
+/// dark background, so it's drawn as a rounded tile.
+fn logo(size: f32) -> egui::Image<'static> {
+    egui::Image::new(egui::include_image!("../assets/displaycraft-256.png"))
+        .fit_to_exact_size(egui::vec2(size, size))
+        .corner_radius((size * 0.14) as u8)
 }
 
 /// "Monitor 1, Output eDP-1 (Sharp ...) at 0, 0, ..." -> "eDP-1"

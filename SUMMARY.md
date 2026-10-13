@@ -22,6 +22,16 @@
   Paper), Inter fonts, and egui styling through
   `craft_ui::theme::WidgetPalette`.
 
+## Logo
+
+`assets/displaycraft.png` (1254x1254, opaque dark background) is the source,
+kept for the program icon. The UI embeds `assets/displaycraft-256.png`, made
+from it with `magick displaycraft.png -resize 256x256 -strip`, through
+`egui::include_image!` and `egui_extras`'s image loaders (`app::logo()`,
+drawn with rounded corners): above the step ladder (once per window, so not
+again on the pages), and in the Preferences and Argyll prompt dialogs.
+Regenerate the 256 copy when the source changes.
+
 ## Dependencies
 
 - eframe/egui 0.36 (`wgpu`, `wayland`, `default_fonts` only).
@@ -33,6 +43,7 @@
   own `lightcraft-ui-egui` can't be used as a dependency because it pulls in
   nine of LightCraft's engine crates.
 - `chrono` for local-time file names.
+- `egui_extras` (`image`) and `image` (`png` only) for the logo.
 
 ## Platform check
 

@@ -9,6 +9,9 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "default_fonts"] }
 egui = "0.36"
+# Image loading for the logo
+egui_extras = { version = "0.36", default-features = false, features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Native folder picker (XDG portal on Linux), as LightCraft uses
 rfd = "0.17"

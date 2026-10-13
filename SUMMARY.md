@@ -20,11 +20,13 @@
   Preferences offers (`Variant`: label and display system, the default
   first), where the bundled ArgyllCMS is (`bundled_dir()`), and why it's
   missing. Linux: auto, KDE + Wayland and GNOME, KDE + X11, with
-  `/opt/argyll-kde-wayland/bin` standing in when run from source. Others
-  (Windows, macOS, not yet packaged): one "Bundled ArgyllCMS", from
-  `$DISPLAYCRAFT_ARGYLL_BIN`. Also `open()`, for files and links:
-  xdg-open, `cmd /C start ""` on Windows, `open` on macOS. Checked to
-  compile for `x86_64-pc-windows-gnu`.
+  `/opt/argyll-kde-wayland/bin` standing in when run from source. macOS
+  (`MacOs`): one "Bundled ArgyllCMS", in `Contents/Resources/argyll/bin`
+  of the app the executable is in. Windows (`Single`, not yet packaged):
+  one "Bundled ArgyllCMS", from `$DISPLAYCRAFT_ARGYLL_BIN`. Also `open()`,
+  for files and links: xdg-open, `open` on macOS, `cmd /C start ""` on
+  Windows. Checked to compile (`cargo check`) for `aarch64-apple-darwin`
+  and `x86_64-pc-windows-gnu`.
 - `src/targets.rs`: calibration targets and their dispcal arguments.
 - `src/settings.rs`: preferences (`argyll_bin`, `argyll_variant`, `theme`, `correction`, and
   the last `targets`, saved whenever they change) in
@@ -117,7 +119,7 @@ ArgyllCMS): a warning above every page but Preferences, and the rest
 works. Identification takes about 4 s, mostly `dispcal -?` probing USB and
 serial ports for instruments, so it runs on a thread (`App::scan`, taken up
 by `poll_scan()` in `logic()`): the window opens at once, Display and
-Spectro show a spinner, Refresh is disabled and Start explains the wait. A
+Spectro show a spinner, Refresh is disabled and Begin explains the wait. A
 new scan replaces a running one, whose result is dropped.
 
 ## Running ArgyllCMS
@@ -165,25 +167,36 @@ new scan replaces a running one, whose result is dropped.
   CRT` fallback).
 - `Job::start` runs a tool under `stdbuf -o0 -e0` with piped stdin, stdout
   and stderr, and turns its output into events: lines (split on `\r` and
-  `\n`), `patch N of M` progress, and prompts. Prompts have no trailing
-  newline, so the unterminated remainder is checked for "any other key" or
-  a trailing "continue:". Argyll's `next_con_char`/`poll_con_char`
+  `\n`), `patch N of M` progress, and prompts (`Event::Prompt`, with the
+  last four lines printed before it, which say what went wrong). Most
+  prompts have no trailing newline, so the unterminated remainder is
+  checked (`is_prompt()`: "Esc or Q" in any case, "any other key", or a
+  trailing "continue:"); complete lines are checked too, as "Hit any key to
+  retry, or Esc or Q to abort:" after a failed instrument calibration ends
+  with one. Argyll's `next_con_char`/`poll_con_char`
   `tcgetattr` warnings (stdin isn't a terminal) are printed without line
   breaks, so they're cut out of the middle of lines.
 - `job_controls()` takes where Cancel and the status go. Measurement puts
   Cancel at the foot of the page during a run (a bottom-up layout with the
   page above it, `page_run_body()`); Verify shows the status on its own
-  line between the profile selector and Start, and while measuring shows the
+  line between the profile selector and Begin, and while measuring shows the
 progress bar with Cancel under it, 1.5 rows apart; Report keeps both
 inline.
 - Prompts are answered on the page (`App::job_controls()`), not in a
-  dialog. From Start until the first prompt is answered (`placing`), the page
+  dialog. From Begin until the first prompt is answered (`placing`), the page
   asks for the instrument to be placed at the center of the screen, with
   Measure (enabled once Argyll has asked) and Cancel. Argyll prints "Place
   instrument on test window." as a complete line, so its placement prompt
   arrives as just the key instructions; with those removed it is shown as
   "Place the measurement device on the patch and press Measure to begin."
-  Prompts with text of their own show it. Measure writes a space to stdin.
+  `prompt_message()` turns a prompt into what's shown: after a misread, a
+  sensor in the wrong position (an i1Display's diffuser over the lens) or
+  a failed instrument calibration, "Unable to measure. Check that the
+  device is uncovered and placed on the measurement patch, then press
+  Measure to try again."; after a communication problem, a lost-contact
+  message; otherwise the prompt's own text from before its key
+  instructions, however they're worded. Measure writes a space to stdin,
+  which retries or continues.
 - Cancelling sends SIGTERM, so dispwin's signal handler restores the
   display's color settings. That handler exits with status 0, so the app
   records the cancel (`cancelled`) rather than trusting the exit status: a
@@ -359,12 +372,42 @@ in `tmp/appimage-cache`. The container runs with SELinux labelling off
 (`--security-opt label=disable`) rather than relabelling mounts with `:Z`,
 which would relabel the source trees.
 
-`.github/workflows/build.yml`: "Run workflow" on the Actions tab makes a test
-build, kept as an artifact for two weeks; pushing a `v*` tag publishes a
-GitHub release with the AppImage (`gh release create`, with generated
-notes). Rust's build output and appimagetool are cached, keyed on
-`Cargo.lock`. Other platforms are meant to be further jobs attaching to the
-same release.
+`packaging/ARGYLLCMS.txt` is shared by both packages.
+
+`packaging/macos/make-app.sh` builds on macOS itself (a GitHub macos-15
+runner, Apple Silicon, or a Mac with Xcode's command line tools and Rust),
+for the machine's architecture, with `MACOSX_DEPLOYMENT_TARGET=11.0` for
+rustc and ArgyllCMS's compiles alike. Neither Homebrew nor Xcode has jam,
+so it builds ArgyllCMS's own Jam 2.5 (`ajam-2.5.2-1.3.3.tgz` from
+argyllcms.com, checked by SHA-256), only its first stage `jam0`, with
+warnings current clang treats as errors turned off; it's cached. Sources
+are copied as for the AppImage, ArgyllCMS built with the same
+`-sBUILTIN_*` options (so nothing comes from Homebrew), DisplayCraft with
+`cargo --locked`. `DisplayCraft.app`: `Contents/MacOS/displaycraft`, the
+same eleven ArgyllCMS programs in `Contents/Resources/argyll/bin` and the
+corrections in `.../argyll/ref` (`system::MacOs::bundled_dir()` looks
+there, beside the executable, unless `DISPLAYCRAFT_ARGYLL_BIN` is set),
+licences and `ARGYLLCMS.txt` (with the commit) in `Resources/doc`, an
+`.icns` made with iconutil from the hicolor PNGs (no 1024 px, so no
+512@2x), and an `Info.plist` (`io.github.bson.displaycraft`, version
+from Cargo.toml). The script fails if `otool -L` shows anything outside
+`/usr/lib` and `/System/Library`. strip removes the linker's signature,
+so the bundle gets an ad-hoc one (`codesign --sign -`), without which
+Apple Silicon won't run it; it's no Developer ID, so Gatekeeper still
+asks. It goes in a disk image, `DisplayCraft-<version>-macos-<arch>.dmg`
+(`hdiutil`, UDZO, with an Applications link to drag it to), which keeps
+its signature and file modes as one file.
+
+`.github/workflows/build.yml`: an `appimage` and a `macos` job each build
+and upload their file as an artifact (two weeks); "Run workflow" on the
+Actions tab stops there. On a `v*` tag, a `release` job that needs both
+downloads them and publishes a GitHub release with all of them
+(`gh release create`, with generated notes), so a release only appears
+when every platform built. Each job caches its build output keyed on
+`Cargo.lock` (and appimagetool or jam). Uploads use
+`upload-artifact@v7` with `archive: false`, so the AppImage and the disk
+image download as they are (the artifact takes the file's name), and the
+release job's `download-artifact@v8` passes them through unzipped.
 
 Built so far: 17.5 MB, needing glibc 2.39 at most; the bundled ArgyllCMS
 programs need only libwayland-client and libdbus. Started here with fresh
@@ -524,7 +567,7 @@ KWin keeps the path but switches to sRGB.
   generic `Other: l = LCD, c = CRT` line merged without duplicates.
 - `app::hardware_tests::calibrate_profile_and_install` (ignored by default;
   run with `cargo test -- --ignored --nocapture`) drives the real app with
-  egui_kittest: Measure, Start, then Measure or Continue at each Argyll prompt,
+  egui_kittest: Measure, Begin, then Measure or Continue at each Argyll prompt,
   Install profile. With the i1Display Pro behind a powered hub, Low quality:
   283 s, white point error 0.33 dE, average neutral error 0.39 dE, and KWin
   switched to the installed copy in ICC mode.
@@ -559,6 +602,9 @@ KWin keeps the path but switches to sRGB.
   rendered pictures with a made-up DP-3 added: the Display dropdown lists
   both, and choosing DP-3 on Profiles moved the unmarked profile first and
   marked the eDP-1 ones "made for eDP-1".
+- The GitHub test build (AppImage of 9826341), downloaded on another
+  desktop with several displays, ran, offered display selection, and
+  calibrated a display other than the one DisplayCraft's window was on.
 
 - `app::hardware_tests::calibrate_and_profile` (ignored by default; Low
   quality, saved Settings, `DISPLAYCRAFT_TEST_LUT=1` for LUT) runs the four
@@ -590,5 +636,4 @@ KWin keeps the path but switches to sRGB.
 Not yet tested by hand: the Preferences page (Browse, changing the choice), and
 the correction list and Browse on the Spectro page, Export CSV, and the
 Measure and Cancel buttons while measuring, the Profiles page's buttons
-(clicked), and deleting a profile, and anything with a second monitor
-attached.
+(clicked), and deleting a profile.

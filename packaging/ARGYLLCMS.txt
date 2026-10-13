@@ -1,8 +1,10 @@
-ArgyllCMS in this AppImage
+ArgyllCMS in DisplayCraft
 
-The programs in usr/lib/argyll are a modified ArgyllCMS 3.5.0 (by Graeme W.
-Gill, https://www.argyllcms.com), licensed under the GNU Affero General
-Public License version 3 (ArgyllCMS-LICENSE.txt).
+The ArgyllCMS programs DisplayCraft comes with (in usr/lib/argyll in the
+AppImage, Contents/Resources/argyll in DisplayCraft.app) are a modified
+ArgyllCMS 3.5.0 (by Graeme W. Gill, https://www.argyllcms.com), licensed
+under the GNU Affero General Public License version 3
+(ArgyllCMS-LICENSE.txt).
 
 It was modified to run natively on Wayland under KDE Plasma (KWin), as well
 as on X11, choosing when each program starts: on Plasma's Wayland, test

@@ -343,9 +343,10 @@ pub enum Event {
     Line(String),
     /// "patch N of M".
     Progress(u32, u32),
-    /// The tool waits for a key, e.g. to place the instrument. The text is
-    /// the prompt's recent context.
-    Prompt(String),
+    /// The tool waits for a key, e.g. to place the instrument or retry a
+    /// failed reading. `before` is the last few lines printed before it,
+    /// which say what went wrong, if anything; they come as Lines too.
+    Prompt { prompt: String, before: Vec<String> },
     /// A reading dispcal rewrites in place during interactive adjustment
     /// ("/ Current Br 117.34, ..."). Not logged: there's one a second.
     Live(String),
@@ -435,6 +436,7 @@ fn read_output(mut stream: Box<dyn Read + Send>, tx: Sender<Event>, wake: impl F
     let mut buf = [0u8; 4096];
     let mut pending = String::new();
     let mut prompted = false;
+    let mut before: Vec<String> = Vec::new();
     loop {
         let n = match stream.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -450,7 +452,17 @@ fn read_output(mut stream: Box<dyn Read + Send>, tx: Sender<Event>, wake: impl F
             }
             if let Some(progress) = parse_progress(&line) {
                 let _ = tx.send(progress);
+            } else if !prompted && is_prompt(&line) {
+                // Some prompts end with a newline, e.g. after a failed
+                // instrument calibration
+                let _ = tx.send(Event::Prompt { prompt: line, before: std::mem::take(&mut before) });
+                prompted = true;
+                continue;
             } else {
+                before.push(line.clone());
+                if before.len() > 4 {
+                    before.remove(0);
+                }
                 let _ = tx.send(Event::Line(line));
             }
             prompted = false;
@@ -465,8 +477,8 @@ fn read_output(mut stream: Box<dyn Read + Send>, tx: Sender<Event>, wake: impl F
             wake();
             continue;
         }
-        if !prompted && (rest.contains("any other key") || rest.ends_with("continue:")) {
-            let _ = tx.send(Event::Prompt(rest));
+        if !prompted && is_prompt(&rest) {
+            let _ = tx.send(Event::Prompt { prompt: rest, before: std::mem::take(&mut before) });
             pending.clear();
             prompted = true;
         }
@@ -477,6 +489,14 @@ fn read_output(mut stream: Box<dyn Read + Send>, tx: Sender<Event>, wake: impl F
         let _ = tx.send(Event::Line(rest));
     }
     wake();
+}
+
+/// Whether ArgyllCMS is waiting for a key. Its prompts are worded several
+/// ways ("Hit Esc or Q to give up, any other key to retry:", "Hit any key to
+/// retry, or Esc or Q to abort:", "... or hit Esc or Q to abort: "), and
+/// some have no "any other key".
+fn is_prompt(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("esc or q") || text.contains("any other key") || text.ends_with("continue:")
 }
 
 fn clean(s: &str) -> String {

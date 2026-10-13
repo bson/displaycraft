@@ -57,7 +57,10 @@ rustup -q default stable
 git config --global --add safe.directory '*'
 copy_tree() {
     mkdir -p "$2"
-    git -C "$1" ls-files -co --exclude-standard -z | tar -C "$1" --null --no-recursion -T - -cf - | tar -C "$2" -xf -
+    # Tracked files deleted in the tree are still listed, so they're skipped
+    git -C "$1" ls-files -co --exclude-standard -z \
+        | while IFS= read -r -d '' f; do if [ -e "$1/$f" ]; then printf '%s\0' "$f"; fi; done \
+        | tar -C "$1" --null --no-recursion -T - -cf - | tar -C "$2" -xf -
 }
 
 rm -rf "$WORK" && mkdir -p "$WORK"
@@ -115,7 +118,7 @@ cp LICENSE-MIT LICENSE-APACHE NOTICE "$app/usr/share/doc/displaycraft/"
 cp "$WORK/argyllcms/License.txt" "$app/usr/share/doc/displaycraft/ArgyllCMS-LICENSE.txt"
 # Which source this was built from, as the AGPL asks
 {
-    cat packaging/appimage/ARGYLLCMS.txt
+    cat packaging/ARGYLLCMS.txt
     echo "    Commit: $argyll_commit${argyll_dirty:+ (with uncommitted changes, so not exactly this source)}"
 } >"$app/usr/share/doc/displaycraft/ARGYLLCMS.txt"
 install -m 0755 packaging/appimage/AppRun "$app/AppRun"

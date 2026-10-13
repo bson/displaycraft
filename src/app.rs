@@ -333,7 +333,7 @@ pub struct App {
     log: Vec<String>,
     progress: Option<(u32, u32)>,
     prompt: Option<String>,
-    /// From Start until the user says the instrument is in place: the first
+    /// From Begin until the user says the instrument is in place: the first
     /// prompt (Argyll's "Place instrument on test window") is answered by
     /// the Measure button rather than shown
     placing: bool,
@@ -809,7 +809,7 @@ impl App {
                 }
                 Event::Live(text) => self.adjust.live(&text),
                 Event::Progress(n, m) => self.progress = Some((n, m)),
-                Event::Prompt(text) => self.prompt = Some(text),
+                Event::Prompt { prompt, before } => self.prompt = Some(prompt_message(&prompt, &before)),
             }
         }
         let Some(code) = job.try_wait() else { return };
@@ -2237,9 +2237,9 @@ impl App {
         }
     }
 
-    /// Start, and while a job runs, what it's waiting for and Cancel.
-    /// Returns true when Start is clicked. Argyll's first prompt asks for
-    /// the instrument to be placed, so a placement message shows from Start
+    /// Begin, and while a job runs, what it's waiting for and Cancel.
+    /// Returns true when Begin is clicked. Argyll's first prompt asks for
+    /// the instrument to be placed, so a placement message shows from Begin
     /// on, before the prompt itself arrives; Measure answers it. Prompts
     /// with text of their own (e.g. to retry after a failed reading) show
     /// it.
@@ -2251,7 +2251,7 @@ impl App {
         let mut start = false;
         let running = self.job.as_ref().map(|(k, _)| *k);
         let message = match self.prompt.as_deref() {
-            Some(p) => Some(prompt_message(p)),
+            Some(p) => Some(p.to_string()),
             None if self.placing => Some("Open the measurement device and place it on the box at the center of the screen.".to_string()),
             None => None,
         };
@@ -2264,7 +2264,7 @@ impl App {
         ui.horizontal(|ui| {
             match (self.ready(), running) {
                 (Ok(()), None) => {
-                    if ui.button(RichText::new("Start").font(t.semibold(13.0))).clicked() {
+                    if ui.button(RichText::new("Begin").font(t.semibold(13.0))).clicked() {
                         start = true;
                     }
                 }
@@ -2285,7 +2285,7 @@ impl App {
                     }
                 }
                 (Err(why), None) => {
-                    ui.add_enabled(false, egui::Button::new("Start"));
+                    ui.add_enabled(false, egui::Button::new("Begin"));
                     ui.label(RichText::new(why).color(t.caution));
                 }
             }
@@ -2688,10 +2688,11 @@ fn with_field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// "Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, ..." ->
-/// "eDP-1 (Sharp Corporation eDP-1)"
+/// "eDP-1 (Sharp Corporation eDP-1)". On macOS there's no "Output", and a
+/// comma before "at": "Built-in Display, at 0, 0, ..." -> "Built-in Display".
 fn display_name(description: &str) -> String {
     let text = description.split(", ").find_map(|p| p.strip_prefix("Output ")).unwrap_or(description);
-    text.split(" at ").next().unwrap_or(text).to_string()
+    text.split(" at ").next().unwrap_or(text).trim_end_matches([',', ' ']).to_string()
 }
 
 /// The output a DisplayCraft profile was made for, from its name
@@ -2704,16 +2705,36 @@ fn made_for(file_name: &str) -> Option<&str> {
     (digits(date, 8) && digits(time, 6) && !output.is_empty()).then_some(output)
 }
 
-/// Argyll's prompt without its key instructions, which don't apply here
-fn prompt_message(text: &str) -> String {
-    let message = text
-        .replace("Hit Esc or Q to give up, any other key to continue:", "")
-        .replace("Hit Esc or Q to give up, any other key to retry:", "")
-        .trim()
-        .to_string();
+/// What to show for an Argyll prompt, answered with Measure (retry or
+/// continue) or Cancel: a failed reading explained by what usually causes
+/// it, or the prompt's own text without its key instructions, which don't
+/// apply here. `before` is what Argyll printed just before it.
+fn prompt_message(prompt: &str, before: &[String]) -> String {
+    let said = |what: &str| before.iter().any(|l| l.contains(what));
+    // A misread, an i1Display's diffuser left over the lens ("wrong
+    // position"), or a calibration failing for either reason
+    if said("misread") || said("wrong position") || said("Calibration failed") {
+        return "Unable to measure. Check that the device is uncovered and placed on the measurement patch, then \
+                press Measure to try again."
+            .into();
+    }
+    if said("communication problem") {
+        return "Lost contact with the measurement device. Check its connection, then press Measure to try again.".into();
+    }
+    if said("Place instrument back on test window") {
+        return "Place the measurement device back on the patch, then press Measure.".into();
+    }
+    // Everything from the key instructions on, however they're worded
+    let lower = prompt.to_ascii_lowercase();
+    let cut = ["correct position then hit", "or hit esc", "hit esc", "hit any key", "any other key"]
+        .iter()
+        .filter_map(|k| lower.find(k))
+        .min()
+        .unwrap_or(prompt.len());
+    let message = prompt[..cut].trim().trim_end_matches(',').trim();
     // Argyll prints "Place instrument on test window." as a line of its
     // own, so the placement prompt arrives as just the key instructions
-    if message.is_empty() { "Place the measurement device on the patch and press Measure to begin.".into() } else { message }
+    if message.is_empty() { "Place the measurement device on the patch and press Measure to begin.".into() } else { message.into() }
 }
 
 /// "/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)" ->
@@ -2863,7 +2884,7 @@ mod hardware_tests {
         }
         println!("{}", app.settings.targets.describe());
         harness.run_steps(2);
-        harness.get_by_label("Start").click();
+        harness.get_by_label("Begin").click();
         harness.step();
         let started = Instant::now();
         run_until_idle(&mut harness, Duration::from_secs(3600));
@@ -2887,9 +2908,9 @@ mod hardware_tests {
         harness.run_steps(2);
         // Low quality: the same path as the others, in less time
         harness.state_mut().settings.targets.quality = Quality::Low;
-        harness.get_by_label("Start").click();
+        harness.get_by_label("Begin").click();
         harness.step();
-        assert!(harness.state().job.is_some(), "Start didn't launch dispcal: {:?}", harness.state().status);
+        assert!(harness.state().job.is_some(), "Begin didn't launch dispcal: {:?}", harness.state().status);
 
         run_until_idle(&mut harness, Duration::from_secs(1800));
         let app = harness.state();
@@ -2932,9 +2953,9 @@ mod hardware_verify_tests {
 
         harness.get_by_label_contains("Verify").click();
         harness.run_steps(2);
-        harness.get_by_label("Start").click();
+        harness.get_by_label("Begin").click();
         harness.step();
-        assert!(harness.state().job.is_some(), "Start didn't launch dispread: {:?}", harness.state().status);
+        assert!(harness.state().job.is_some(), "Begin didn't launch dispread: {:?}", harness.state().status);
         super::hardware_tests::run_until_idle(&mut harness, Duration::from_secs(900));
 
         let app = harness.state();
@@ -2971,9 +2992,9 @@ mod hardware_report_tests {
         for mode in [ReportMode::Uncalibrated, ReportMode::Current] {
             harness.state_mut().report_mode = mode;
             harness.run_steps(2);
-            harness.get_by_label("Start").click();
+            harness.get_by_label("Begin").click();
             harness.step();
-            assert!(harness.state().job.is_some(), "Start didn't launch dispread: {:?}", harness.state().status);
+            assert!(harness.state().job.is_some(), "Begin didn't launch dispread: {:?}", harness.state().status);
             super::hardware_tests::run_until_idle(&mut harness, Duration::from_secs(300));
             let app = harness.state();
             let o = app.report_outcome.as_ref().unwrap_or_else(|| panic!("no report: {:?}; log:\n{}", app.status, app.log.join("\n")));
@@ -3038,7 +3059,7 @@ mod hardware_adjust_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{instrument_name, output_name};
+    use super::{display_name, instrument_name, output_name, prompt_message};
 
     #[test]
     fn profile_names() {
@@ -3046,6 +3067,25 @@ mod tests {
         assert_eq!(super::made_for("HDMI-A-1-20261012-204053.icc"), Some("HDMI-A-1"));
         assert_eq!(super::made_for("7JXK8-LQ170R1 #1 2024-09-08 15-17 2.2 F-S XYZLUT+MTX.icc"), None);
         assert_eq!(super::display_name("Monitor 2, Output DP-3 (Dell U2413) at 2560, 0, width 1920, height 1200"), "DP-3 (Dell U2413)");
+    }
+
+    #[test]
+    fn display_names() {
+        assert_eq!(display_name("Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, width 2560, height 1600"), "eDP-1 (Sharp Corporation eDP-1)");
+        assert_eq!(display_name("Built-in Display, at 0, 0, width 2624, height 1696 (Primary Display)"), "Built-in Display");
+    }
+
+    #[test]
+    fn prompt_messages() {
+        let none: [String; 0] = [];
+        let placing = prompt_message("Hit Esc or Q to give up, any other key to continue:", &none);
+        assert_eq!(placing, "Place the measurement device on the patch and press Measure to begin.");
+        let covered = ["Spot read failed due to the sensor being in the wrong position".to_string(), "(Instrument is in the wrong mode)".into()];
+        let msg = prompt_message("Correct position then hit Esc or Q to give up, any other key to retry:", &covered);
+        assert!(msg.starts_with("Unable to measure. Check that the device is uncovered"), "{msg}");
+        let cal = ["Calibration failed with 'Misread' (...)".to_string()];
+        assert!(prompt_message("Hit any key to retry, or Esc or Q to abort:", &cal).starts_with("Unable to measure"));
+        assert_eq!(prompt_message("Something else happened, hit Esc or Q to abort: ", &none), "Something else happened");
     }
 
     #[test]

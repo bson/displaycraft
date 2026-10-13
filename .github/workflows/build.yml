@@ -1,13 +1,13 @@
-# Builds the KDE Plasma (Wayland) AppImage.
+# Builds the Linux AppImage and the macOS app.
 #
-# - "Run workflow" on the Actions tab: a test build, kept as a downloadable
-#   artifact for two weeks.
-# - Pushing a version tag (git tag v0.1.0 && git push origin v0.1.0): a
-#   public release with the AppImage attached. The tag must match the
-#   version in Cargo.toml.
+# - "Run workflow" on the Actions tab: test builds, kept as downloadable
+#   artifacts for two weeks.
+# - Pushing a version tag (git tag v0.1.0 && git push origin v0.1.0): the
+#   same, then a public release with every platform's build attached. The
+#   tag must match the version in Cargo.toml.
 #
-# Other platforms' builds will be further jobs here, attaching their files
-# to the same release.
+# Each platform is a job uploading its build; the release job collects
+# them, so a release only appears when all of them built.
 name: Build
 
 on:
@@ -30,7 +30,7 @@ jobs:
           submodules: true
 
       # Crates, build output and appimagetool; Rust itself is on the runner
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/../cache
           key: appimage-${{ hashFiles('Cargo.lock') }}
@@ -39,18 +39,55 @@ jobs:
       - name: Build the AppImage
         run: packaging/appimage/make-appimage.sh
 
-      - name: Keep the test build
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+      # Uploaded as it is rather than zipped; the artifact takes the file's
+      # name
+      - uses: actions/upload-artifact@v7
         with:
-          name: DisplayCraft-AppImage
           path: dist/*.AppImage
+          archive: false
           retention-days: 14
 
+  # Apple Silicon only for now
+  macos:
+    runs-on: macos-15
+    env:
+      CACHE: ${{ github.workspace }}/../cache
+      OUT: ${{ github.workspace }}/dist
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+
+      # jam and Rust's build output
+      - uses: actions/cache@v5
+        with:
+          path: ${{ github.workspace }}/../cache
+          key: macos-${{ hashFiles('Cargo.lock') }}
+          restore-keys: macos-
+
+      - name: Build the app
+        run: packaging/macos/make-app.sh
+
+      # The disk image as it is, rather than zipped
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/*.dmg
+          archive: false
+          retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [appimage, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.AppImage \
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
             --title "DisplayCraft ${GITHUB_REF_NAME#v}" --generate-notes

@@ -66,12 +66,41 @@ impl System for Linux {
     }
 }
 
-/// ArgyllCMS has one way of showing test patches here, so there's nothing
-/// to choose
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+struct MacOs;
+
+#[cfg(target_os = "macos")]
+impl System for MacOs {
+    fn variants(&self) -> &'static [Variant] {
+        &[Variant { label: "Bundled ArgyllCMS", window_system: None }]
+    }
+
+    /// Inside DisplayCraft.app, beside the executable in Contents/MacOS:
+    /// Contents/Resources/argyll/bin
+    fn bundled_dir(&self) -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("DISPLAYCRAFT_ARGYLL_BIN") {
+            return Some(PathBuf::from(dir));
+        }
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?.parent()?.join("Resources/argyll/bin");
+        dir.join("dispcal").exists().then_some(dir)
+    }
+
+    fn no_bundled(&self) -> &'static str {
+        "There's no bundled ArgyllCMS: DisplayCraft wasn't started from DisplayCraft.app"
+    }
+
+    fn open(&self, target: &OsStr) {
+        let _ = Command::new("open").arg(target).spawn();
+    }
+}
+
+/// Windows, for now: ArgyllCMS has one way of showing test patches, so
+/// there's nothing to choose
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 struct Single;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl System for Single {
     fn variants(&self) -> &'static [Variant] {
         &[Variant { label: "Bundled ArgyllCMS", window_system: None }]
@@ -83,16 +112,15 @@ impl System for Single {
 
     fn open(&self, target: &OsStr) {
         // start's first quoted argument is a window title, hence the ""
-        #[cfg(windows)]
         let _ = Command::new("cmd").args(["/C", "start", ""]).arg(target).spawn();
-        #[cfg(not(windows))]
-        let _ = Command::new("open").arg(target).spawn();
     }
 }
 
 pub fn current() -> &'static dyn System {
     #[cfg(target_os = "linux")]
     return &Linux;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    return &MacOs;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     return &Single;
 }

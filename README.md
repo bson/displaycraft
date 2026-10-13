@@ -69,13 +69,30 @@ Plasma 6.4 or later, or with an X server or XWayland. The Wayland ArgyllCMS is t
     git submodule update --init
     packaging/appimage/build.sh
 
-The AppImage is written to `dist/`. On GitHub, the Build workflow makes a
-test build when run from the Actions tab, and publishes a release with the
-AppImage when a version tag (`v0.1.0`, matching `Cargo.toml`) is pushed.
+The AppImage is written to `dist/`.
 
 Measuring instruments need a udev rule giving the user access. Where the
 system has none, DisplayCraft offers to install ArgyllCMS's rule, asking
 for an administrator password.
+
+## macOS
+
+`packaging/macos/make-app.sh` builds `DisplayCraft.app`, with the same
+ArgyllCMS inside, in a disk image in `dist/`, on a Mac with Xcode's command line
+tools and Rust. It builds for the Mac's own processor; GitHub builds for
+Apple Silicon. The app isn't signed with an Apple Developer ID, so macOS
+asks before the first launch: allow it in System Settings > Privacy &
+Security, or run `xattr -dr com.apple.quarantine DisplayCraft.app`. On
+macOS DisplayCraft builds and starts, but measuring hasn't been made to
+work there yet.
+
+## Releases
+
+On GitHub, the Build workflow makes test builds of the AppImage and the
+macOS app when run from the Actions tab, and publishes a release with both
+when a version tag (`v0.1.0`, matching `Cargo.toml`) is pushed. Both are
+downloaded as they are, not zipped. A downloaded AppImage needs
+`chmod +x` before it runs.
 
 ## License
 

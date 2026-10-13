@@ -273,15 +273,19 @@ over SSH). `ARGYLL_SRC` builds from another checkout instead. A submodule's
 git data is in DisplayCraft's `.git`, so in the container it's reached
 through DisplayCraft's mount; another checkout gets a mount of its own.
 
-`packaging/appimage/build.sh` runs `inside.sh` in an Ubuntu 24.04 container
-(glibc 2.39, the oldest base with Plasma 6.4+; also GitHub's ubuntu-24.04
-runner). The sources are mounted read-only and copied as git sees them
+`packaging/appimage/make-appimage.sh` does the build on Ubuntu 24.04
+(glibc 2.39, the oldest base with Plasma 6.4+): `build.sh` runs it in a
+podman or docker container, and the GitHub workflow runs it directly on an
+ubuntu-24.04 runner. It uses `sudo` for apt only when not root, and an
+installed rustup if there is one (the runners have it), otherwise one kept in
+the cache. For a tag build it stops unless the tag is `v` plus Cargo.toml's
+version. The sources are mounted read-only and copied as git sees them
 (tracked and new files, not ignored ones), so host build output, ArgyllCMS's
 in-tree objects in particular, doesn't get linked in. ArgyllCMS is built
 with `-sBUILTIN_TIFF/JPEG/PNG/Z/SSL=true`, as its own release script does,
-leaving only libwayland-client and libdbus as dependencies;
-`-sWLPROTO_SYS/-sWLPROTO_KDE` point it at the host's protocol definitions,
-which are newer than Ubuntu 24.04's packages. DisplayCraft is built with
+leaving only libwayland-client and libdbus as dependencies; its Wayland
+protocol definitions come with it (`wlproto/` in the fork), as Ubuntu
+24.04's are too old. DisplayCraft is built with
 rustup's stable Rust. The AppDir holds `usr/bin/displaycraft`, eleven
 ArgyllCMS programs in `usr/lib/argyll/bin` (those DisplayCraft runs, plus
 spotread, ccxxmake, oeminst and iccdump), the vendor corrections in
@@ -295,7 +299,14 @@ Preferences still wins. appimagetool (from the AppImage project's releases)
 runs extracted, as there's no FUSE in the container. Downloads are cached
 in `tmp/appimage-cache`. The container runs with SELinux labelling off
 (`--security-opt label=disable`) rather than relabelling mounts with `:Z`,
-which fails on /usr/share and would relabel the source trees. The sidebar
+which would relabel the source trees.
+
+`.github/workflows/build.yml`: "Run workflow" on the Actions tab makes a test
+build, kept as an artifact for two weeks; pushing a `v*` tag publishes a
+GitHub release with the AppImage (`gh release create`, with generated
+notes). Rust's build output and appimagetool are cached, keyed on
+`Cargo.lock`. Other platforms are meant to be further jobs attaching to the
+same release. The sidebar
 says "inside the AppImage" for the bundled ArgyllCMS, whose mount point
 changes every run.
 

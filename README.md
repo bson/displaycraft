@@ -57,7 +57,9 @@ Plasma 6.4 or later. The Wayland ArgyllCMS is the `argyllcms` submodule
     git submodule update --init
     packaging/appimage/build.sh
 
-The AppImage is written to `dist/`.
+The AppImage is written to `dist/`. On GitHub, the Build workflow makes a
+test build when run from the Actions tab, and publishes a release with the
+AppImage when a version tag (`v0.1.0`, matching `Cargo.toml`) is pushed.
 
 Measuring instruments need a udev rule giving the user access. Where the
 system has none, DisplayCraft offers to install ArgyllCMS's rule, asking

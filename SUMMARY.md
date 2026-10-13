@@ -199,7 +199,7 @@ inline.
   Measure (enabled once Argyll has asked) and Cancel. Argyll prints "Place
   instrument on test window." as a complete line, so its placement prompt
   arrives as just the key instructions; with those removed it is shown as
-  "Place the measurement device on the patch and press Measure to begin."
+  "With the spectro on the patch, press Measure to begin."
   `prompt_message()` turns a prompt into what's shown: after a misread, a
   sensor in the wrong position (an i1Display's diffuser over the lens) or
   a failed instrument calibration, "Unable to measure. Check that the

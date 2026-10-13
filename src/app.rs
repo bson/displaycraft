@@ -86,13 +86,15 @@ enum JobKind {
 }
 
 impl JobKind {
-    /// Where a profile-making job is in the sequence, for the page
+    /// What the job is doing, shown above its progress: where a
+    /// profile-making job is in the sequence
     fn stage(self) -> Option<&'static str> {
         match self {
             JobKind::Calibrate => Some("Step 1 of 4: calibrating"),
-            JobKind::Targen => Some("Step 2 of 4: choosing the profile patches"),
-            JobKind::ProfileRead => Some("Step 3 of 4: measuring the profile patches"),
+            JobKind::Targen => Some("Step 2 of 4: choosing profile patches"),
+            JobKind::ProfileRead => Some("Step 3 of 4: measuring profile patches"),
             JobKind::Colprof => Some("Step 4 of 4: building the profile"),
+            JobKind::Verify => Some("Measuring…"),
             _ => None,
         }
     }
@@ -927,7 +929,7 @@ impl App {
                         o.installed = true;
                         self.verify_profile = Some(o.icc.clone());
                     }
-                    self.status = Some((true, "Profile installed. KWin now uses it for this display.".into()));
+                    self.status = Some((true, "Profile installed. KWin now uses it on the display.".into()));
                 } else {
                     self.status = Some((false, "Installing the profile failed. See the log.".into()));
                 }
@@ -2733,7 +2735,7 @@ fn prompt_message(prompt: &str, before: &[String]) -> String {
     let message = prompt[..cut].trim().trim_end_matches(',').trim();
     // Argyll prints "Place instrument on test window." as a line of its
     // own, so the placement prompt arrives as just the key instructions
-    if message.is_empty() { "Place the measurement device on the patch and press Measure to begin.".into() } else { message.into() }
+    if message.is_empty() { "With the spectro on the patch, press Measure to begin.".into() } else { message.into() }
 }
 
 /// "/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)" ->
@@ -3081,7 +3083,7 @@ mod tests {
     fn prompt_messages() {
         let none: [String; 0] = [];
         let placing = prompt_message("Hit Esc or Q to give up, any other key to continue:", &none);
-        assert_eq!(placing, "Place the measurement device on the patch and press Measure to begin.");
+        assert_eq!(placing, "With the spectro on the patch, press Measure to begin.");
         let covered = ["Spot read failed due to the sensor being in the wrong position".to_string(), "(Instrument is in the wrong mode)".into()];
         let msg = prompt_message("Correct position then hit Esc or Q to give up, any other key to retry:", &covered);
         assert!(msg.starts_with("Unable to measure. Check that the device is uncovered"), "{msg}");
@@ -3172,7 +3174,7 @@ mod page_pictures {
                 harness.run_steps(2);
             }
             if name == "verify-status" {
-                harness.state_mut().status = Some((true, "Profile installed. KWin now uses it for this display.".into()));
+                harness.state_mut().status = Some((true, "Profile installed. KWin now uses it on the display.".into()));
                 harness.run_steps(2);
             }
             if name == "targets-lut" {

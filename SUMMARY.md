@@ -16,6 +16,8 @@
 - `src/verify.rs`: the verification patch set, `colverify` parsing,
   scoring and the text report.
 - `src/corrections.rs`: finding and labelling `.ccss`/`.ccmx` files.
+- `src/session.rs`: when the window can't open at all (no Wayland), prints
+  the reason and tries `kdialog`, then `zenity`.
 - `src/theme.rs`: LightCraft's four themes (Charcoal, Midnight, Silver,
   Paper), Inter fonts, and egui styling through
   `craft_ui::theme::WidgetPalette`.
@@ -31,6 +33,17 @@
   own `lightcraft-ui-egui` can't be used as a dependency because it pulls in
   nine of LightCraft's engine crates.
 - `chrono` for local-time file names.
+
+## Platform check
+
+Whether DisplayCraft can run is ArgyllCMS's call: the identify step
+(`App::refresh_inventory`, at startup and on Refresh/Apply) first runs
+`dispwin -Q` (`argyll::check_platform`). Unsupported: the steps are disabled
+and the page shows ArgyllCMS's reasons, with Check again and Preferences, so
+another ArgyllCMS can still be chosen. Unknown (no `platform` line, i.e. a
+dispwin without `-Q`, so not the Wayland build): a warning, and the rest
+works. Identification takes about 4 s, mostly `dispcal -?` probing USB and
+serial ports for instruments, and runs before the window appears.
 
 ## Running ArgyllCMS
 
@@ -101,6 +114,18 @@ dispread.
    1-21.
 6. Files go to `$XDG_DATA_HOME/displaycraft/verify/<profile>-verify-<stamp>`
    (`-expected.ti1/.ti3`, `-measured.ti1/.ti3`, `.txt` report).
+
+Measuring needs the Wayland ArgyllCMS's pass-through fix: before it, with
+the profile under test installed, patches went through that profile's own
+tone curves and grays measured far off (a calibration to D55 showed grays at
+x 0.306). With it, the same grays measure neutral at D55.
+
+What remains after that fix is real: profiles that dispcal -o made for a
+white point far from the panel's native one (D55 here) predict grays
+increasingly redder than their white (a* up to +12 near 85%), and record a
+white point (x 0.311) that isn't the calibrated one. Measured grays are
+neutral, so the calibration is right and the profile's model of the top end
+is wrong. A D65 calibration, close to native, doesn't show it.
 
 Checking the approach: a profile whose own prediction bends from its white
 point target near full drive (white at x 0.3087 against grays at 0.335)

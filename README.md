@@ -14,6 +14,8 @@ displaycraft is not affiliated with ArtCraft.
 
 ## Requirements
 
+- KDE Plasma on Wayland. ArgyllCMS checks this when DisplayCraft starts, and
+  DisplayCraft won't run anywhere it reports the platform as unsupported.
 - ArgyllCMS. Its directory can be set in Preferences; otherwise it's looked
   for in `DISPLAYCRAFT_ARGYLL_BIN`, `/opt/argyll-kde-wayland/bin`, then on
   `PATH`.

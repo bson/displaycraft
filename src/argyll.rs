@@ -36,6 +36,37 @@ pub fn auto_bin_dir() -> Option<PathBuf> {
     })
 }
 
+/// Whether ArgyllCMS can drive the displays in this session, as it reports
+/// with `dispwin -Q`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Platform {
+    /// With a description, e.g. "KDE Plasma (KWin) on Wayland"
+    Supported(String),
+    /// With what's missing
+    Unsupported(String),
+    /// This ArgyllCMS doesn't know -Q, so it isn't the Wayland build
+    Unknown,
+}
+
+pub fn check_platform(bin: &Path) -> Platform {
+    match Command::new(bin.join("dispwin")).arg("-Q").stdin(Stdio::null()).output() {
+        Ok(out) => parse_platform(&String::from_utf8_lossy(&out.stdout)),
+        Err(e) => Platform::Unsupported(format!("dispwin won't run: {e}")),
+    }
+}
+
+fn parse_platform(text: &str) -> Platform {
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("platform supported: ") {
+            return Platform::Supported(rest.trim().to_string());
+        }
+        if let Some(rest) = line.strip_prefix("platform unsupported: ") {
+            return Platform::Unsupported(rest.trim().to_string());
+        }
+    }
+    Platform::Unknown
+}
+
 /// Check that `dir` holds a working ArgyllCMS. Returns its version, or why not.
 pub fn probe(dir: &Path) -> Result<String, String> {
     if !dir.is_dir() {
@@ -348,6 +379,16 @@ mod tests {
         assert_eq!(inv.display_types[0].description, "Non-Refresh display [Default,CB1]");
         assert_eq!(inv.display_types[3].description, "LCD White LED IPS (WLED AC LG Samsung)");
         assert_eq!(inv.display_types[4].description, "CRT");
+    }
+
+    #[test]
+    fn parses_platform_report() {
+        assert_eq!(parse_platform("platform supported: KDE Plasma (KWin) on Wayland\n"),
+                   Platform::Supported("KDE Plasma (KWin) on Wayland".into()));
+        assert_eq!(parse_platform("platform unsupported: can't connect to a Wayland compositor\n"),
+                   Platform::Unsupported("can't connect to a Wayland compositor".into()));
+        // An older dispwin prints its usage for the unknown option
+        assert_eq!(parse_platform("Test display patch window, Version 3.4.1\nusage: dispwin\n"), Platform::Unknown);
     }
 
     #[test]

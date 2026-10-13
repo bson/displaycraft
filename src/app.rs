@@ -175,6 +175,8 @@ pub struct App {
     settings: Settings,
     prefs: Option<Prefs>,
     bin: Option<PathBuf>,
+    /// What ArgyllCMS says about this session (None until it's been found)
+    platform: Option<argyll::Platform>,
     inventory: Inventory,
     inventory_error: Option<String>,
     theme: ThemeKind,
@@ -213,6 +215,7 @@ impl App {
             bin: argyll::find_bin_dir(settings.argyll_bin.as_deref()),
             settings,
             prefs: None,
+            platform: None,
             inventory: Inventory::default(),
             inventory_error: None,
             theme,
@@ -240,12 +243,23 @@ impl App {
         app
     }
 
+    /// Identify what can be measured: first whether ArgyllCMS supports this
+    /// session at all, then the displays and instruments.
     fn refresh_inventory(&mut self) {
         let Some(bin) = &self.bin else {
+            self.platform = None;
             self.inventory = Inventory::default();
             self.inventory_error = Some("ArgyllCMS wasn't found. Set its directory in Preferences.".into());
             return;
         };
+        let platform = argyll::check_platform(bin);
+        let unsupported = matches!(platform, argyll::Platform::Unsupported(_));
+        self.platform = Some(platform);
+        if unsupported {
+            self.inventory = Inventory::default();
+            self.inventory_error = None;
+            return;
+        }
         match argyll::inventory(bin) {
             Ok(inv) => {
                 self.display = self.display.min(inv.displays.len().saturating_sub(1));
@@ -262,8 +276,17 @@ impl App {
         }
     }
 
+    fn unsupported(&self) -> Option<&str> {
+        match &self.platform {
+            Some(argyll::Platform::Unsupported(why)) => Some(why),
+            _ => None,
+        }
+    }
+
     fn ready(&self) -> Result<(), &'static str> {
-        if self.inventory.displays.is_empty() {
+        if self.unsupported().is_some() {
+            Err("ArgyllCMS can't run on this platform")
+        } else if self.inventory.displays.is_empty() {
             Err("No display found")
         } else if self.inventory.instruments.is_empty() {
             Err("No instrument found. Connect one and refresh.")
@@ -656,7 +679,8 @@ impl App {
             let button = egui::Button::new(text).selected(selected).min_size(egui::vec2(ui.available_width(), 30.0));
             // Settings can't change under a running calibration
             let job_step = self.job.as_ref().map(|(kind, _)| kind.step());
-            if ui.add_enabled(!running || Some(step) == job_step, button).clicked() {
+            let usable = self.unsupported().is_none();
+            if ui.add_enabled(usable && (!running || Some(step) == job_step), button).clicked() {
                 self.step = step;
             }
         }
@@ -664,6 +688,31 @@ impl App {
             ui.add_space(8.0);
             if let Some(bin) = &self.bin {
                 ui.label(RichText::new(bin.display().to_string()).small().color(t.text_dim));
+            }
+        });
+    }
+
+    /// Shown instead of every step when ArgyllCMS can't run here.
+    fn page_unsupported(&mut self, ui: &mut egui::Ui, why: &str) {
+        let t = Tokens::get(ui.ctx());
+        ui.heading("DisplayCraft can't run here");
+        ui.add_space(6.0);
+        ui.label("ArgyllCMS can't show test patches or load calibrations in this session:");
+        ui.label(RichText::new(why).color(t.bad));
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("DisplayCraft needs KDE Plasma on Wayland, with the Wayland build of ArgyllCMS.").color(t.text_dim),
+        );
+        if let Some(bin) = &self.bin {
+            ui.label(RichText::new(format!("Checked with {}", bin.join("dispwin").display())).small().color(t.text_dim));
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Check again").clicked() {
+                self.refresh_inventory();
+            }
+            if ui.button("Preferences").clicked() && self.prefs.is_none() {
+                self.prefs = Some(Prefs::from_settings(&self.settings));
             }
         });
     }
@@ -1111,6 +1160,21 @@ impl eframe::App for App {
         });
         egui::Panel::left("steps").exact_size(t.panel_w).resizable(false).show(ui, |ui| self.sidebar(ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.canvas).inner_margin(16)).show(ui, |ui| {
+            if let Some(why) = self.unsupported().map(str::to_string) {
+                self.page_unsupported(ui, &why);
+                return;
+            }
+            if self.platform == Some(argyll::Platform::Unknown) {
+                ui.label(
+                    RichText::new(
+                        "This ArgyllCMS can't say whether it supports this platform, so it's probably not the \
+                         Wayland build: test patches and calibrations may be wrong. Set the Wayland build's \
+                         directory in Preferences.",
+                    )
+                    .color(t.caution),
+                );
+                ui.add_space(8.0);
+            }
             if let Some(err) = &self.inventory_error {
                 ui.label(RichText::new(err).color(t.bad));
                 ui.add_space(8.0);

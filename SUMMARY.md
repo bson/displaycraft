@@ -25,6 +25,10 @@
 - `src/verify.rs`: the verification patch set, `colverify` parsing,
   scoring, the text report and CSV export.
 - `src/corrections.rs`: finding and labelling `.ccss`/`.ccmx` files.
+- Preferences is a page (`Step::Preferences`, `page_preferences()`), its
+  button at the foot of the sidebar above the ArgyllCMS version and path.
+  Its unapplied state (`Prefs`) lives while the page is open and starts
+  over after Apply; the theme applies at once.
 - `src/report.rs`: the display report's patch set, `.ti3` reading and the
   arithmetic (gamma fit, CCT, u'v' gamut coverage).
 - `src/profiles.rs`: reading ICC profiles (description, date, white point),
@@ -44,7 +48,7 @@ from it with `magick displaycraft.png -resize <n>x<n> -strip`; regenerate
 them when the source changes. The UI embeds the 256 one through
 `egui::include_image!` and `egui_extras`'s image loaders (`app::logo()`,
 drawn with rounded corners): above the step ladder (once per window, so not
-again on the pages), and in the Preferences dialog. `main.rs` also sets it
+again on the pages). `main.rs` also sets it
 as the window icon, which matters only when not installed: on Wayland the
 compositor takes the icon from the desktop entry matching the app id
 (`displaycraft`).
@@ -74,7 +78,8 @@ use it, and other applications' icons in the user's folder made it fail.)
 Whether DisplayCraft can run is ArgyllCMS's call: the identify step
 (`App::refresh_inventory`, at startup and on Refresh/Apply) first runs
 `dispwin -Q` (`argyll::check_platform`). Unsupported: the steps are disabled
-and the page shows ArgyllCMS's reasons, with Check again and Preferences, so
+and the page shows ArgyllCMS's reasons, with Check again and a button to
+the Preferences page (which stays reachable when unsupported), so
 another ArgyllCMS can still be chosen. Unknown (no `platform` line, i.e. a
 dispwin without `-Q`, so not the Wayland build): a warning, and the rest
 works. Identification takes about 4 s, mostly `dispcal -?` probing USB and
@@ -106,6 +111,10 @@ new scan replaces a running one, whose result is dropped.
   a trailing "continue:". Argyll's `next_con_char`/`poll_con_char`
   `tcgetattr` warnings (stdin isn't a terminal) are printed without line
   breaks, so they're cut out of the middle of lines.
+- `job_controls()` takes where Cancel and the status go. Measurement puts
+  Cancel at the foot of the page during a run (a bottom-up layout with the
+  page above it, `page_run_body()`); Verify shows the status on its own
+  line between the profile selector and Start; Report keeps both inline.
 - Prompts are answered on the page (`App::job_controls()`), not in a
   dialog. From Start until the first prompt is answered (`placing`), the page
   asks for the instrument to be placed at the center of the screen, with
@@ -132,7 +141,37 @@ values; `Targets::describe()` gives the "Goals" line on the Measurement
 page. Settings shows the chosen display and its backlight correction
 (correction file or display type) under the heading; Measurement shows the
 instrument (the name from Argyll's description, without the USB path) and
-correction. Its log is collapsed by default. Settings rows are spaced out
+correction. Its log is collapsed by default.
+
+Profile type is Shaper+matrix (default) or LUT. Low quality can't be combined
+with LUT: each greys out the other, and `Targets::settle()` raises a saved
+Low+LUT to Medium at startup and when measuring starts. A test LUT from
+Low's 100 patches verified at 0.96/2.95 against the matrix profile's
+0.39/1.32 from the same patches. `targets::LOW_QUALITY_LUT` lifts the
+restriction; it's set by building with the `low-quality-lut` feature
+(`cargo run --features low-quality-lut`).
+
+LUT has a circled question mark (`help()`, drawn rather than a font glyph)
+explaining that it helps most with displays of poor linearity. On this
+panel, profiles built from the same 250 measured patches (a Medium D55 run)
+and verified against one measurement of the 57 patches through its
+calibration: shaper+matrix average 0.38 / maximum 1.03 / grays 0.56; the
+LUT as made 0.54 / 1.67 / 0.85; LUT at colprof `-qh` 0.58 / 1.93 / 1.01;
+LUT with `-r 1.0` smoothing the same as made. The panel is linear enough
+that a matrix describes it better than a table of its readings (it's a
+factory-calibrated wide-gamut panel).
+
+Verify tells the two cases apart (`verify::additivity()`): the largest
+difference between white, yellow, cyan and magenta at full drive and the
+sum of their channels measured alone (less the black in each reading), over
+X, Y and Z, as a percentage of white's Y. It's shown in the summary card
+("Channel additivity: off by N%") and the report. A shaper+matrix profile
+(no `A2B0` tag, `profiles::Info::lut`) that doesn't verify Good gets advice:
+over `verify::ADDITIVITY_LIMIT` (2%), that a LUT may verify better, with a
+button that switches Settings to LUT (raising Low to Medium) and opens them;
+under it, that a LUT is unlikely to help. This panel is off by 0.26%. The
+LUT help says to try Shaper+matrix first and that Verify will suggest a LUT
+when it looks worthwhile. Settings rows are spaced out
 and wrap (`choices()`; `with_field()` keeps a Custom choice next to its
 value).
 
@@ -145,15 +184,40 @@ saved; a correction file is.
 
 ## Measure
 
-`dispcal -v -d D -c C [-y T] -m -q Q [-t K] -g G|s [-b B] -o base.icc base`.
-`-m` skips the interactive monitor-controls adjustment. `-o` takes an
-optional file name, so the profile name is always given explicitly;
-otherwise it would consume the output base name that follows. Output goes to
-`$XDG_DATA_HOME/displaycraft/<output>-<YYYYMMDD-HHMMSS>.{cal,icc}`. The
-result shows dispcal's final error summary lines; "Install profile" runs
-`dispwin -d D -I base.icc`, which with the Wayland ArgyllCMS installs it via
-ucmm and points KWin at the installed copy. A successful install makes the
-new profile Verify's choice.
+Making a profile is four jobs in a row (`JobKind::Calibrate`, `Targen`,
+`ProfileRead`, `Colprof`), each started by `App::next_stage()` when the
+previous one succeeds, sharing one log and shown as "Step N of 4" above the
+progress bar. Files are named after `base`,
+`$XDG_DATA_HOME/displaycraft/<output>-<YYYYMMDD-HHMMSS>`:
+
+1. `dispcal -v -d D -c C [-y T|-X F] -m -q Q [-t K] -g G|s [-b B] -o
+   work/<name>-quick.icc base` writes `base.cal`. `-m` skips the
+   interactive monitor-controls adjustment. `-o` takes an optional file
+   name, so it's always given; otherwise it would consume the base name
+   that follows. dispcal's quick profile goes to `work/`, out of the
+   profiles folder.
+2. `targen -v -d3 -G -e4 -B4 -g9 -f N -c quick.icc base` writes `base.ti1`:
+   video RGB, 4 white and 4 black patches, a 9 step gray axis, and the rest
+   optimized spread patches placed using the quick profile, N in total
+   (`Quality::patches()`: 100, 250 or 600; under 4 s even for 600).
+3. `dispread -v -d D -c C [-y|-X] -Y p -k base.cal base` measures them
+   through the new calibration, writing `base.ti3`; `-Y p` because the
+   instrument is already in place. `-k` also records the calibration in the
+   `.ti3`.
+4. `colprof -v -q Q -a s|X -D description -O base.icc base`: shaper+matrix
+   (`s`) or an XYZ LUT with matrix tags as a fallback (`X`). The calibration
+   in the `.ti3` becomes the profile's vcgt. The description names the
+   output, time and targets; the Profiles page shows DisplayCraft profiles
+   by file name and the description on hover.
+
+KWin accepts both types: its ICC support reads BToA tables (lut8, lut16 and
+lutBToA) and uses them in its color shader. A failed or cancelled stage
+removes everything the run wrote (`CalRun::discard()`); a finished one
+removes the quick profile. The result shows dispcal's final summary lines and
+colprof's "Profile check complete, peak err = ..., avg err = ..." line.
+"Install profile" runs `dispwin -d D -I base.icc`, which with the Wayland
+ArgyllCMS installs it via ucmm and points KWin at the installed copy. A
+successful install makes the new profile Verify's choice.
 
 ## Corrections
 
@@ -294,7 +358,19 @@ KWin keeps the path but switches to sRGB.
   both, and choosing DP-3 on Profiles moved the unmarked profile first and
   marked the eDP-1 ones "made for eDP-1".
 
-Not yet tested by hand: the Preferences dialog (opening, Browse, Apply), and
+- `app::hardware_tests::calibrate_and_profile` (ignored by default; Low
+  quality, saved Settings, `DISPLAYCRAFT_TEST_LUT=1` for LUT) runs the four
+  stages through the page without installing. D50, gamma 2.2, 100 patches:
+  - Shaper+matrix: 603 s; calibration white point error 0.48 dE, average
+    neutral 0.43; colprof check average 0.39, peak 1.23. Verified Good:
+    average 0.39, maximum 1.32, grays 0.52/1.28 (the dispcal -o profile it
+    replaces verified 0.71/1.96). The profile has a vcgt; the work folder
+    was emptied.
+  - LUT: 563 s; colprof check average 1.80, peak 6.23. Verified Good but
+    weaker: average 0.96, maximum 2.95. 100 patches are too few for a LUT.
+    Installed briefly, KWin took it in ICC mode with no warnings.
+
+Not yet tested by hand: the Preferences page (Browse, Apply), and
 the correction list and Browse on the Spectro page, Export CSV, and the
 Measure and Cancel buttons while measuring, the Profiles page's buttons
 (clicked), and deleting a profile.

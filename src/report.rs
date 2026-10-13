@@ -75,10 +75,17 @@ pub fn write_linear_cal(path: &Path) -> std::io::Result<()> {
 /// .ti3. Its XYZ is scaled so white is Y = 100; LUMINANCE_XYZ_CDM2 gives
 /// white's absolute value.
 pub fn read_ti3(text: &str) -> Option<Vec<[f64; 3]>> {
+    read_xyz(text, PATCHES.len(), true)
+}
+
+/// XYZ of patches 1..=`count` from a dispread .ti3, in cd/m² if `absolute`,
+/// otherwise as recorded (white Y = 100)
+pub fn read_xyz(text: &str, count: usize, absolute: bool) -> Option<Vec<[f64; 3]>> {
     let white_y: f64 = text
         .lines()
         .find_map(|l| l.strip_prefix("LUMINANCE_XYZ_CDM2"))
-        .and_then(|v| v.trim().trim_matches('"').split_whitespace().nth(1)?.parse().ok())?;
+        .and_then(|v| v.trim().trim_matches('"').split_whitespace().nth(1)?.parse().ok())
+        .or((!absolute).then_some(100.0))?;
     let fields: Vec<&str> = text
         .split("BEGIN_DATA_FORMAT")
         .nth(1)?
@@ -89,10 +96,10 @@ pub fn read_ti3(text: &str) -> Option<Vec<[f64; 3]>> {
     let col = |name: &str| fields.iter().position(|f| *f == name);
     let (id, x, y, z) = (col("SAMPLE_ID")?, col("XYZ_X")?, col("XYZ_Y")?, col("XYZ_Z")?);
     let data = text.split("\nBEGIN_DATA\n").nth(1)?.split("END_DATA").next()?;
-    let mut out = vec![None; PATCHES.len()];
+    let mut out = vec![None; count];
     for line in data.lines() {
         let v: Vec<&str> = line.split_whitespace().collect();
-        let Some(i) = v.get(id).and_then(|s| s.parse::<usize>().ok()).filter(|i| (1..=PATCHES.len()).contains(i)) else { continue };
+        let Some(i) = v.get(id).and_then(|s| s.parse::<usize>().ok()).filter(|i| (1..=count).contains(i)) else { continue };
         let num = |c: usize| v.get(c)?.parse::<f64>().ok().map(|n| n * white_y / 100.0);
         out[i - 1] = Some([num(x)?, num(y)?, num(z)?]);
     }

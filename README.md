@@ -4,7 +4,8 @@ Display calibration and profiling for Linux desktops, written in Rust with the
 look of the ArtCraft applications (egui with the ArtCraft `craft-ui` library).
 It walks through picking a display and instrument (with a colorimeter
 correction if wanted), setting calibration targets, then calibrating, making
-an ICC profile and installing it, and verifying how accurate a profile is.
+an ICC profile (shaper+matrix or LUT, from a set of measured patches) and
+installing it, and verifying how accurate a profile is.
 Verification results can be exported as CSV. A display report measures
 brightness, contrast, gamma, white point and gamut coverage, uncalibrated
 or as calibrated, and a profiles page shows which profile KWin is using

@@ -13,6 +13,9 @@ pub struct Info {
     /// The display's white point, CIE xy. Only v2 profiles record it
     /// directly (v4 white points are D50 by definition), so None otherwise.
     pub white: Option<(f64, f64)>,
+    /// Has a device-to-PCS table (A2B0), i.e. is a LUT profile rather than
+    /// curves and a matrix
+    pub lut: bool,
 }
 
 impl Info {
@@ -59,6 +62,7 @@ pub fn parse(b: &[u8]) -> Option<Info> {
         })
     };
     let description = tag(b"desc").and_then(text).unwrap_or_default();
+    let lut = tag(b"A2B0").is_some();
     let white = if version < 4 {
         tag(b"wtpt").filter(|t| t.starts_with(b"XYZ ")).and_then(|t| {
             let (x, y, z) = (s15f16(t, 8)?, s15f16(t, 12)?, s15f16(t, 16)?);
@@ -68,7 +72,7 @@ pub fn parse(b: &[u8]) -> Option<Info> {
     } else {
         None
     };
-    Some(Info { description, created, white })
+    Some(Info { description, created, white, lut })
 }
 
 /// Text of a v2 'desc' or v4 'mluc' tag
@@ -242,6 +246,7 @@ mod tests {
         assert!((x - 0.3325).abs() < 1e-3 && (y - 0.3481).abs() < 1e-3, "{x} {y}");
         let cct = info.cct().unwrap();
         assert!((cct - 5500.0).abs() < 60.0, "{cct}");
+        assert!(!info.lut);
         assert!(parse(b"not a profile").is_none());
     }
 

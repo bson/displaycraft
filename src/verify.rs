@@ -111,6 +111,37 @@ pub fn parse_colverify(text: &str) -> Vec<PatchResult> {
     out
 }
 
+/// How far the display's channels are from adding up: the largest
+/// difference, over white, yellow, cyan and magenta at full drive and each
+/// of X, Y and Z, between the patch and the sum of its channels measured
+/// alone (less the black every reading includes), as a percentage of
+/// white's Y. A shaper+matrix profile assumes they add up exactly.
+/// `measured` is in `patches()` order.
+pub fn additivity(measured: &[[f64; 3]]) -> Option<f64> {
+    let p = patches();
+    let at = |name: &str| p.iter().position(|q| q.name == name).and_then(|i| measured.get(i)).copied();
+    let (k, w) = (at("Gray 0%")?, at("Gray 100%")?);
+    let (r, g, b) = (at("Red 100%")?, at("Green 100%")?, at("Blue 100%")?);
+    let sum = |parts: &[[f64; 3]]| -> [f64; 3] {
+        [0, 1, 2].map(|c| parts.iter().map(|p| p[c]).sum::<f64>() - (parts.len() - 1) as f64 * k[c])
+    };
+    let cases = [
+        (w, sum(&[r, g, b])),
+        (at("Yellow 100%")?, sum(&[r, g])),
+        (at("Cyan 100%")?, sum(&[g, b])),
+        (at("Magenta 100%")?, sum(&[r, b])),
+    ];
+    if w[1] <= 0.0 {
+        return None;
+    }
+    Some(cases.iter().flat_map(|(m, s)| (0..3).map(move |c| (m[c] - s[c]).abs())).fold(0.0, f64::max) / w[1] * 100.0)
+}
+
+/// Above this (percent of white), the channels don't add up well enough for
+/// a shaper+matrix profile, and a LUT may describe the display better. This
+/// panel (an LCD) measured 0.26; displays that need a LUT miss by several.
+pub const ADDITIVITY_LIMIT: f64 = 2.0;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Verdict {
     Good,
@@ -180,7 +211,14 @@ pub fn swatch(p: &Patch) -> [u8; 3] {
 }
 
 /// A plain text report.
-pub fn report(profile: &Path, summary: &Summary, patches: &[Patch], results: &[PatchResult], correction: Option<&Path>) -> String {
+pub fn report(
+    profile: &Path,
+    summary: &Summary,
+    patches: &[Patch],
+    results: &[PatchResult],
+    correction: Option<&Path>,
+    additivity: Option<f64>,
+) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "DisplayCraft verification report");
     let _ = writeln!(s, "Date: {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
@@ -193,6 +231,9 @@ pub fn report(profile: &Path, summary: &Summary, patches: &[Patch], results: &[P
     let _ = writeln!(s, "CIEDE2000, readings normalised to white:");
     let _ = writeln!(s, "  Average {:.2}, maximum {:.2}, best 90% average {:.2}", summary.average, summary.maximum, summary.best90_average);
     let _ = writeln!(s, "  Grayscale average {:.2}, maximum {:.2}", summary.gray_average, summary.gray_maximum);
+    if let Some(a) = additivity {
+        let _ = writeln!(s, "Channel additivity: white and the secondaries are off by up to {a:.2}% of white from the sum of their channels");
+    }
     let _ = writeln!(s, "\n{:>3}  {:<30} {:>18}  {:>20}  {:>20}  {:>6}", "#", "Patch", "Device RGB %", "Expected L*a*b*", "Measured L*a*b*", "dE00");
     for r in results {
         let Some(p) = patches.get(r.index - 1) else { continue };
@@ -249,6 +290,34 @@ mod tests {
         assert!((s.maximum - 3.5).abs() < 1e-9);
         assert!((s.gray_maximum - 0.45).abs() < 1e-9);
         assert_eq!(s.verdict, Verdict::Acceptable);
+
+        // A display whose channels add up, then one whose white falls 5% short
+        let p = patches();
+        let channel = |name: &str| match name {
+            n if n.starts_with("Red") => [41.0, 21.0, 2.0],
+            n if n.starts_with("Green") => [36.0, 72.0, 12.0],
+            n if n.starts_with("Blue") => [18.0, 7.0, 95.0],
+            _ => [0.0; 3],
+        };
+        let mut m: Vec<[f64; 3]> = p
+            .iter()
+            .map(|q| {
+                let parts: Vec<[f64; 3]> = match q.name.as_str() {
+                    "Gray 100%" => vec![channel("Red"), channel("Green"), channel("Blue")],
+                    "Yellow 100%" => vec![channel("Red"), channel("Green")],
+                    "Cyan 100%" => vec![channel("Green"), channel("Blue")],
+                    "Magenta 100%" => vec![channel("Red"), channel("Blue")],
+                    n => vec![channel(n)],
+                };
+                [0, 1, 2].map(|c| 0.1 + parts.iter().map(|x| x[c]).sum::<f64>())
+            })
+            .collect();
+        assert!(additivity(&m).unwrap() < 1e-9);
+        let w = p.iter().position(|q| q.name == "Gray 100%").unwrap();
+        m[w] = m[w].map(|v| v * 0.95);
+        // Largest miss is in Z: 5% of 109.1, against white's Y of 0.95 * 100.1
+        let expected = 0.05 * 109.1 / (0.95 * 100.1) * 100.0;
+        assert!((additivity(&m).unwrap() - expected).abs() < 1e-6 && expected > ADDITIVITY_LIMIT);
 
         let text = csv(&patches(), &r);
         let lines: Vec<&str> = text.lines().collect();

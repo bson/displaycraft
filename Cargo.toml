@@ -21,6 +21,11 @@ toml = "0.9"
 # the revision LightCraft uses.
 craft-ui = { git = "https://github.com/storytold/craft-libs", rev = "5c874d51eeb3de70e735c8ce87a59a7dedd47675" }
 
+[features]
+# Allow LUT profiles at Low quality (100 patches), which are too few for a
+# good LUT. For development: `cargo run --features low-quality-lut`.
+low-quality-lut = []
+
 [profile.release]
 lto = "thin"
 

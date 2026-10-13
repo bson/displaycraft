@@ -35,7 +35,42 @@ pub enum Quality {
     High,
 }
 
+/// Whether a LUT profile may be made at Low quality. Its 100 patches are
+/// too few: a test LUT verified at average 0.96 / maximum 2.95 where a
+/// shaper+matrix from the same patches gave 0.39 / 1.32. Off unless built
+/// with the `low-quality-lut` feature.
+pub const LOW_QUALITY_LUT: bool = cfg!(feature = "low-quality-lut");
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ProfileType {
+    /// Per-channel curves and a matrix: smooth, small, understood by every
+    /// application
+    ShaperMatrix,
+    /// A table of measured colors (with matrix tags as a fallback): follows
+    /// a panel's quirks more closely, given enough patches
+    Lut,
+}
+
+impl ProfileType {
+    /// colprof's -a value
+    pub fn arg(self) -> &'static str {
+        match self {
+            ProfileType::ShaperMatrix => "s",
+            ProfileType::Lut => "X",
+        }
+    }
+}
+
 impl Quality {
+    /// How many patches to measure for the profile
+    pub fn patches(self) -> u32 {
+        match self {
+            Quality::Low => 100,
+            Quality::Medium => 250,
+            Quality::High => 600,
+        }
+    }
+
     pub fn arg(self) -> &'static str {
         match self {
             Quality::Low => "l",
@@ -57,6 +92,7 @@ pub struct Targets {
     pub set_brightness: bool,
     pub brightness: f64,
     pub quality: Quality,
+    pub profile: ProfileType,
 }
 
 impl Default for Targets {
@@ -69,11 +105,27 @@ impl Default for Targets {
             set_brightness: false,
             brightness: 120.0,
             quality: Quality::Medium,
+            profile: ProfileType::ShaperMatrix,
         }
     }
 }
 
 impl Targets {
+    /// Whether this quality and profile type may be combined
+    pub fn allows(quality: Quality, profile: ProfileType) -> bool {
+        LOW_QUALITY_LUT || !(quality == Quality::Low && profile == ProfileType::Lut)
+    }
+
+    /// Make a disallowed combination (e.g. from older settings) allowed, by
+    /// raising the quality. Returns true if anything changed.
+    pub fn settle(&mut self) -> bool {
+        if Self::allows(self.quality, self.profile) {
+            return false;
+        }
+        self.quality = Quality::Medium;
+        true
+    }
+
     /// The daylight temperature to calibrate to, or None for native white
     pub fn kelvin(&self) -> Option<f64> {
         match self.white {
@@ -93,7 +145,8 @@ impl Targets {
         }
     }
 
-    /// e.g. "White D55 (5500 K), gamma 2.2, native brightness, medium quality"
+    /// e.g. "White D55 (5500 K), gamma 2.2, native brightness, medium quality,
+    /// shaper+matrix profile"
     pub fn describe(&self) -> String {
         let white = match self.white {
             White::Native => "native white".to_string(),
@@ -111,7 +164,11 @@ impl Targets {
             Quality::Medium => "medium",
             Quality::High => "high",
         };
-        let mut text = format!("{white}, {tone}, {brightness}, {quality} quality");
+        let profile = match self.profile {
+            ProfileType::ShaperMatrix => "shaper+matrix profile",
+            ProfileType::Lut => "LUT profile",
+        };
+        let mut text = format!("{white}, {tone}, {brightness}, {quality} quality, {profile}");
         text[..1].make_ascii_uppercase();
         text
     }
@@ -126,11 +183,19 @@ mod tests {
         let mut t = Targets { white: White::D55, ..Targets::default() };
         assert_eq!(t.kelvin(), Some(5500.0));
         assert_eq!(t.gamma_arg(), "2.2");
-        assert_eq!(t.describe(), "White D55 (5500 K), gamma 2.2, native brightness, medium quality");
+        assert_eq!(t.describe(), "White D55 (5500 K), gamma 2.2, native brightness, medium quality, shaper+matrix profile");
         t.white = White::Native;
         t.tone = Tone::Gamma;
         t.gamma = 2.4;
         assert_eq!(t.kelvin(), None);
         assert_eq!(t.gamma_arg(), "2.40");
+    }
+
+    #[test]
+    fn low_quality_lut() {
+        let mut t = Targets { quality: Quality::Low, profile: ProfileType::Lut, ..Targets::default() };
+        assert_eq!(t.settle(), !LOW_QUALITY_LUT);
+        assert_eq!(t.quality, if LOW_QUALITY_LUT { Quality::Low } else { Quality::Medium });
+        assert!(Targets::allows(Quality::Low, ProfileType::ShaperMatrix));
     }
 }

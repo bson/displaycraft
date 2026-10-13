@@ -5,14 +5,17 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::argyll::WindowSystem;
 use crate::targets::Targets;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Directory holding the ArgyllCMS programs. None means find it
-    /// automatically.
+    /// Directory holding an ArgyllCMS other than the bundled one. None
+    /// means use the bundled one.
     pub argyll_bin: Option<PathBuf>,
+    /// The bundled ArgyllCMS's display system. None means as detected.
+    pub argyll_variant: Option<WindowSystem>,
     /// Theme label, e.g. "Charcoal".
     pub theme: Option<String>,
     /// Colorimeter correction (.ccss/.ccmx) passed with -X. None means use
@@ -64,6 +67,7 @@ mod tests {
     fn round_trips_and_tolerates_unknown_or_missing_fields() {
         let s = Settings {
             argyll_bin: Some("/opt/argyll-kde-wayland/bin".into()),
+            argyll_variant: Some(WindowSystem::X11),
             theme: Some("Paper".into()),
             correction: Some("/usr/local/share/ArgyllCMS/WLEDFamily_07Feb11.ccss".into()),
             targets: Targets { white: crate::targets::White::D55, ..Targets::default() },

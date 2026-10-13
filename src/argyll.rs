@@ -5,35 +5,86 @@
 //! keys from stdin. We run them with unbuffered output on pipes and turn that
 //! into events.
 
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
+use serde::{Deserialize, Serialize};
+
 /// Where the Argyll tools are: the directory set in preferences if there is
-/// one, otherwise $DISPLAYCRAFT_ARGYLL_BIN, the Wayland build in /opt, then
-/// PATH. A preferred directory is used even if it's wrong, so the problem
-/// shows rather than another ArgyllCMS being picked up silently.
+/// one, otherwise the bundled ArgyllCMS, then PATH. A preferred directory
+/// is used even if it's wrong, so the problem shows rather than another
+/// ArgyllCMS being picked up silently.
 pub fn find_bin_dir(preferred: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = preferred {
         return Some(dir.to_path_buf());
     }
-    auto_bin_dir()
+    crate::system::current().bundled_dir().or_else(|| {
+        std::env::var_os("PATH")
+            .and_then(|path| std::env::split_paths(&path).find(|dir| dir.join("dispcal").exists()))
+    })
 }
 
-/// The directory automatic lookup finds, ignoring preferences.
-pub fn auto_bin_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("DISPLAYCRAFT_ARGYLL_BIN") {
-        return Some(PathBuf::from(dir));
+/// The two ways the bundled ArgyllCMS can show test patches
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum WindowSystem {
+    /// Through KWin, on KDE Plasma's Wayland sessions
+    Wayland,
+    /// On X11 sessions (GNOME, KDE and others), and through XWayland on
+    /// other Wayland desktops
+    X11,
+}
+
+impl WindowSystem {
+    /// As ARGYLL_WINDOW_SYSTEM and dispwin -Q name it
+    fn name(self) -> &'static str {
+        match self {
+            WindowSystem::Wayland => "wayland",
+            WindowSystem::X11 => "x11",
+        }
     }
-    let wayland = PathBuf::from("/opt/argyll-kde-wayland/bin");
-    if wayland.join("dispcal").exists() {
-        return Some(wayland);
+
+    fn from_name(name: &str) -> Option<WindowSystem> {
+        match name {
+            "wayland" => Some(WindowSystem::Wayland),
+            "x11" => Some(WindowSystem::X11),
+            _ => None,
+        }
     }
-    std::env::var_os("PATH").and_then(|path| {
-        std::env::split_paths(&path).find(|dir| dir.join("dispcal").exists())
-    })
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WindowSystem::Wayland => "KDE + Wayland",
+            WindowSystem::X11 => "GNOME, KDE + X11",
+        }
+    }
+}
+
+/// The display system every ArgyllCMS program started from now on is told
+/// to use. Global rather than passed along, as every program DisplayCraft
+/// runs must agree: displays listed with one can't be measured with the
+/// other.
+static WINDOW_SYSTEM: Mutex<Option<WindowSystem>> = Mutex::new(None);
+
+/// None leaves the choice to ArgyllCMS: its own detection for the bundled
+/// one, and whatever another ArgyllCMS does (which won't know the
+/// variable).
+pub fn set_window_system(ws: Option<WindowSystem>) {
+    *WINDOW_SYSTEM.lock().unwrap() = ws;
+}
+
+/// An ArgyllCMS program (or a wrapper that runs one), told which display
+/// system to use
+fn command(program: impl AsRef<OsStr>) -> Command {
+    let mut cmd = Command::new(program);
+    if let Some(ws) = *WINDOW_SYSTEM.lock().unwrap() {
+        cmd.env("ARGYLL_WINDOW_SYSTEM", ws.name());
+    }
+    cmd
 }
 
 /// Whether ArgyllCMS can drive the displays in this session, as it reports
@@ -42,29 +93,119 @@ pub fn auto_bin_dir() -> Option<PathBuf> {
 pub enum Platform {
     /// With a description, e.g. "KDE Plasma (KWin) on Wayland"
     Supported(String),
+    /// It runs, with the limitations given, e.g. through XWayland
+    Limited(String),
     /// With what's missing
     Unsupported(String),
-    /// This ArgyllCMS doesn't know -Q, so it isn't the Wayland build
+    /// This ArgyllCMS doesn't know -Q, so it isn't the one DisplayCraft
+    /// comes with
     Unknown,
 }
 
-pub fn check_platform(bin: &Path) -> Platform {
-    match Command::new(bin.join("dispwin")).arg("-Q").stdin(Stdio::null()).output() {
-        Ok(out) => parse_platform(&String::from_utf8_lossy(&out.stdout)),
-        Err(e) => Platform::Unsupported(format!("dispwin won't run: {e}")),
+/// The session as ArgyllCMS sees it, and what it makes of it. The bundled
+/// ArgyllCMS fills in everything; one that doesn't know -Q, nothing but
+/// `platform`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Session {
+    /// $XDG_CURRENT_DESKTOP, e.g. "KDE" or "GNOME"
+    pub desktop: Option<String>,
+    /// e.g. "KWin" or "GNOME Shell", or "none" outside Wayland
+    pub compositor: Option<String>,
+    /// e.g. "Xorg :0" or "XWayland :0", or "none"
+    pub x11_server: Option<String>,
+    pub x11_window_manager: Option<String>,
+    /// What ArgyllCMS would choose by itself
+    pub automatic: Option<WindowSystem>,
+    /// What it's using, which differs when told
+    pub display_system: Option<WindowSystem>,
+    pub platform: Platform,
+}
+
+impl Session {
+    /// e.g. "KDE, Wayland compositor KWin, X server XWayland :0"
+    pub fn describe(&self) -> String {
+        let known = |v: &Option<String>| v.clone().filter(|v| v != "none" && v != "unknown");
+        let mut parts = Vec::new();
+        if let Some(d) = known(&self.desktop) {
+            parts.push(d);
+        }
+        if let Some(c) = known(&self.compositor) {
+            parts.push(format!("Wayland compositor {c}"));
+        }
+        if let Some(x) = known(&self.x11_server) {
+            match known(&self.x11_window_manager) {
+                Some(wm) if self.compositor.as_deref().is_none_or(|c| c == "none") => {
+                    parts.push(format!("X server {x}, window manager {wm}"))
+                }
+                _ => parts.push(format!("X server {x}")),
+            }
+        }
+        if parts.is_empty() { "unknown".into() } else { parts.join(", ") }
     }
 }
 
-fn parse_platform(text: &str) -> Platform {
+/// Ask the ArgyllCMS in `bin` about this session, with the display system
+/// set by set_window_system()
+pub fn check_platform(bin: &Path) -> Session {
+    run_check(command(bin.join("dispwin")))
+}
+
+/// The same for display system `ws` whatever set_window_system() said:
+/// None lets ArgyllCMS choose
+pub fn check_platform_as(bin: &Path, ws: Option<WindowSystem>) -> Session {
+    let mut cmd = Command::new(bin.join("dispwin"));
+    match ws {
+        Some(ws) => cmd.env("ARGYLL_WINDOW_SYSTEM", ws.name()),
+        None => cmd.env_remove("ARGYLL_WINDOW_SYSTEM"),
+    };
+    run_check(cmd)
+}
+
+fn run_check(mut cmd: Command) -> Session {
+    match cmd.arg("-Q").stdin(Stdio::null()).output() {
+        Ok(out) => parse_session(&String::from_utf8_lossy(&out.stdout)),
+        Err(e) => Session {
+            desktop: None,
+            compositor: None,
+            x11_server: None,
+            x11_window_manager: None,
+            automatic: None,
+            display_system: None,
+            platform: Platform::Unsupported(format!("dispwin won't run: {e}")),
+        },
+    }
+}
+
+fn parse_session(text: &str) -> Session {
+    let mut s = Session {
+        desktop: None,
+        compositor: None,
+        x11_server: None,
+        x11_window_manager: None,
+        automatic: None,
+        display_system: None,
+        platform: Platform::Unknown,
+    };
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("platform supported: ") {
-            return Platform::Supported(rest.trim().to_string());
-        }
-        if let Some(rest) = line.strip_prefix("platform unsupported: ") {
-            return Platform::Unsupported(rest.trim().to_string());
+        let Some((key, value)) = line.split_once(": ") else { continue };
+        let value = value.trim().to_string();
+        match key {
+            "desktop" => s.desktop = Some(value),
+            "wayland compositor" => s.compositor = Some(value),
+            "x11 server" => s.x11_server = Some(value),
+            "x11 window manager" => s.x11_window_manager = Some(value),
+            "automatic display system" => s.automatic = WindowSystem::from_name(&value),
+            // "x11 (ARGYLL_WINDOW_SYSTEM)" when told
+            "display system" => {
+                s.display_system = value.split_whitespace().next().and_then(WindowSystem::from_name)
+            }
+            "platform supported" => s.platform = Platform::Supported(value),
+            "platform limited" => s.platform = Platform::Limited(value),
+            "platform unsupported" => s.platform = Platform::Unsupported(value),
+            _ => {}
         }
     }
-    Platform::Unknown
+    s
 }
 
 /// Check that `dir` holds a working ArgyllCMS. Returns its version, or why not.
@@ -103,7 +244,7 @@ pub struct Inventory {
 
 /// Run `dispcal -?` and parse the lists from its usage text.
 pub fn inventory(bin: &Path) -> std::io::Result<Inventory> {
-    let out = Command::new(bin.join("dispcal")).arg("-?").stdin(Stdio::null()).output()?;
+    let out = command(bin.join("dispcal")).arg("-?").stdin(Stdio::null()).output()?;
     // Usage goes to stderr, with a non-zero exit status
     let text = String::from_utf8_lossy(&out.stderr).into_owned() + &String::from_utf8_lossy(&out.stdout);
     Ok(parse_inventory(&text))
@@ -125,7 +266,10 @@ fn parse_inventory(text: &str) -> Inventory {
             continue;
         }
         if line.starts_with(" -") {
-            section = if line.starts_with(" -d n ") {
+            // " -d n[,m]" from every current Linux build, X11 support or
+            // not; " -d n" from older Wayland-only builds of the fork and
+            // from Windows and macOS builds, which "Other" may point at
+            section = if line.starts_with(" -d n[,m] ") || line.starts_with(" -d n ") {
                 Section::Displays
             } else if line.starts_with(" -c listno") {
                 Section::Instruments
@@ -220,7 +364,7 @@ impl Job {
     pub fn start(bin: &Path, tool: &str, args: &[String], wake: impl Fn() + Send + Sync + 'static) -> std::io::Result<Job> {
         // stdbuf, so progress and prompts arrive as they're printed
         // rather than when a pipe buffer fills.
-        let mut child = Command::new("stdbuf")
+        let mut child = command("stdbuf")
             .arg("-o0")
             .arg("-e0")
             .arg(bin.join(tool))
@@ -364,7 +508,8 @@ mod tests {
     fn parses_dispcal_usage() {
         // Raw string: Argyll's indentation is what the parser keys on
         let text = r#"Calibrate a Display, Version 3.5.0
- -d n                 Choose the display from the following list (default 1)
+ -d n[,m]             Choose the display n from the following list (default 1)
+                      Optionally choose different display m for VideoLUT access (X11)
     1 = 'Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, width 2560, height 1600'
  -d dummy             Dummy (non-existant, invisible) display
  -c listno            Choose instrument from the following list (default 1)
@@ -405,13 +550,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_display_option_without_x11() {
+        let text = r#" -d n                 Choose the display from the following list (default 1)
+    1 = 'Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, width 2560, height 1600'
+ -dweb[:port]         Display via a web server at port (default 8080)
+"#;
+        assert_eq!(parse_inventory(text).displays.len(), 1);
+    }
+
+    #[test]
     fn parses_platform_report() {
-        assert_eq!(parse_platform("platform supported: KDE Plasma (KWin) on Wayland\n"),
+        let s = parse_session(
+            "desktop: KDE\nwayland compositor: KWin\nx11 server: XWayland :0\nx11 window manager: KWin\n\
+             automatic display system: wayland\ndisplay system: x11 (ARGYLL_WINDOW_SYSTEM)\n\
+             platform limited: X11 through XWayland :0 on KWin: the compositor may alter the test patch colors\n",
+        );
+        assert_eq!(s.desktop.as_deref(), Some("KDE"));
+        assert_eq!((s.automatic, s.display_system), (Some(WindowSystem::Wayland), Some(WindowSystem::X11)));
+        assert_eq!(s.platform, Platform::Limited("X11 through XWayland :0 on KWin: the compositor may alter the test patch colors".into()));
+        assert_eq!(s.describe(), "KDE, Wayland compositor KWin, X server XWayland :0");
+        let x = parse_session("desktop: GNOME\nwayland compositor: none\nx11 server: Xorg :0\nx11 window manager: GNOME Shell\n");
+        assert_eq!(x.describe(), "GNOME, X server Xorg :0, window manager GNOME Shell");
+        assert_eq!(parse_session("platform supported: KDE Plasma (KWin) on Wayland\n").platform,
                    Platform::Supported("KDE Plasma (KWin) on Wayland".into()));
-        assert_eq!(parse_platform("platform unsupported: can't connect to a Wayland compositor\n"),
+        assert_eq!(parse_session("platform unsupported: can't connect to a Wayland compositor\n").platform,
                    Platform::Unsupported("can't connect to a Wayland compositor".into()));
         // An older dispwin prints its usage for the unknown option
-        assert_eq!(parse_platform("Test display patch window, Version 3.4.1\nusage: dispwin\n"), Platform::Unknown);
+        let old = parse_session("Test display patch window, Version 3.4.1\nusage: dispwin\n");
+        assert_eq!((old.platform, old.automatic), (Platform::Unknown, None));
     }
 
     #[test]

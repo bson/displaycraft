@@ -2,20 +2,30 @@
 
 ## Structure
 
-- `src/main.rs`: eframe window setup (wgpu, Wayland, title `DisplayCraft`,
+- `src/main.rs`: eframe window setup (wgpu, Wayland or X11, title `DisplayCraft <version>` from `CARGO_PKG_VERSION`,
   app id `displaycraft`).
 - `src/app.rs`: the workflow UI. A step sidebar (numbered Display,
   Spectro, Settings, Measure, Verify, then Report and Profiles below a
   separator) and a page per step. Internally the
   steps keep their older names (`Step::Instrument`, `Step::Targets`,
   `Step::Run`). Pages put one and a half text rows (`App::gap()`) after the
-  heading, the description and the choices. The top bar shows
-  `DisplayCraft <version>` from `CARGO_PKG_VERSION`; the ArgyllCMS version
-  and directory are at the bottom of the sidebar. `logic()` drains the
+  heading, the description and the choices. There's no top bar: the
+  window title carries DisplayCraft's version, and the ArgyllCMS version
+  is at the bottom of the sidebar. `logic()` drains the
   running tool's events each frame; `ui()` draws the panels.
 - `src/argyll.rs`: finding and running ArgyllCMS.
+- `src/system.rs`: what differs between operating systems in finding and
+  running the bundled ArgyllCMS. A `System` trait with one implementation
+  per OS, chosen with `cfg` (`system::current()`): the bundled variants
+  Preferences offers (`Variant`: label and display system, the default
+  first), where the bundled ArgyllCMS is (`bundled_dir()`), and why it's
+  missing. Linux: auto, KDE + Wayland and GNOME, KDE + X11, with
+  `/opt/argyll-kde-wayland/bin` standing in when run from source. Others
+  (Windows, macOS, not yet packaged): one "Bundled ArgyllCMS", from
+  `$DISPLAYCRAFT_ARGYLL_BIN`. Checked to compile for
+  `x86_64-pc-windows-gnu`.
 - `src/targets.rs`: calibration targets and their dispcal arguments.
-- `src/settings.rs`: preferences (`argyll_bin`, `theme`, `correction`, and
+- `src/settings.rs`: preferences (`argyll_bin`, `argyll_variant`, `theme`, `correction`, and
   the last `targets`, saved whenever they change) in
   `$XDG_CONFIG_HOME/displaycraft/settings.toml`. Unknown or missing fields
   fall back to defaults, and an unreadable file gives the defaults rather
@@ -26,9 +36,11 @@
   scoring, the text report and CSV export.
 - `src/corrections.rs`: finding and labelling `.ccss`/`.ccmx` files.
 - Preferences is a page (`Step::Preferences`, `page_preferences()`), its
-  button at the foot of the sidebar above the ArgyllCMS version and path.
-  Its unapplied state (`Prefs`) lives while the page is open and starts
-  over after Apply; the theme applies at once.
+  button at the foot of the sidebar above the ArgyllCMS version (no path:
+  the AppImage's mount point changes every run, and Preferences shows the
+  choice).
+  Its state (`Prefs`) lives while the page is open; changes apply at
+  once.
 - `src/adjust.rs`: reading dispcal's interactive adjustment (menu, mode,
   target and live readings).
 - `src/charts.rs`: line, outline, point and bar charts from one description,
@@ -68,7 +80,7 @@ use it, and other applications' icons in the user's folder made it fail.)
 
 ## Dependencies
 
-- eframe/egui 0.36 (`wgpu`, `wayland`, `default_fonts` only).
+- eframe/egui 0.36 (`wgpu`, `wayland`, `x11`, `default_fonts` only; winit loads the X11 libraries at run time, so they add no build or link dependency).
 - `craft-ui` from `storytold/craft-libs`, git only and without stability
   guarantees, so pinned to rev `5c874d5`, the one LightCraft uses. It needs
   Rust 1.95+. It supplies components (icon buttons, tabs, toolbar/split
@@ -82,12 +94,17 @@ use it, and other applications' icons in the user's folder made it fail.)
 ## Platform check
 
 Whether DisplayCraft can run is ArgyllCMS's call: the identify step
-(`App::refresh_inventory`, at startup and on Refresh/Apply) first runs
-`dispwin -Q` (`argyll::check_platform`). Unsupported: the steps are disabled
-and the page shows ArgyllCMS's reasons, with Check again and a button to
-the Preferences page (which stays reachable when unsupported), so
-another ArgyllCMS can still be chosen. Unknown (no `platform` line, i.e. a
-dispwin without `-Q`, so not the Wayland build): a warning, and the rest
+(`App::refresh_inventory`, at startup, on Refresh and on every ArgyllCMS
+change in Preferences) first runs
+`dispwin -Q` (`argyll::check_platform`), parsed into an `argyll::Session`:
+desktop, Wayland compositor, X server and window manager, the display
+system ArgyllCMS would choose itself (`automatic`) and the one it's using,
+and `Platform`. Unsupported: the steps are disabled and the page shows
+ArgyllCMS's reasons and the session, with Check again and a button to the
+Preferences page (which stays reachable when unsupported), so another
+choice can be made. Limited (X11 through XWayland) and Unknown (no
+`platform` line, i.e. a dispwin without `-Q`, so not the bundled
+ArgyllCMS): a warning above every page but Preferences, and the rest
 works. Identification takes about 4 s, mostly `dispcal -?` probing USB and
 serial ports for instruments, so it runs on a thread (`App::scan`, taken up
 by `poll_scan()` in `logic()`): the window opens at once, Display and
@@ -96,16 +113,43 @@ new scan replaces a running one, whose result is dropped.
 
 ## Running ArgyllCMS
 
-- Binaries: the Preferences directory if set, otherwise
-  `$DISPLAYCRAFT_ARGYLL_BIN`, `/opt/argyll-kde-wayland/bin`, then `PATH`. A
-  set directory is used even when it's wrong, so the error shows instead of
-  another ArgyllCMS being used silently. Preferences checks a candidate with
-  `argyll::probe()` (a `dispcal` that runs and reports a version) and only
-  enables Apply when it passes; Apply is also disabled during a run. Browse
+- Binaries: the "Other" directory if set (`argyll_bin`), otherwise the
+  bundled ArgyllCMS (`System::bundled_dir()`: on Linux
+  `$DISPLAYCRAFT_ARGYLL_BIN`, set by AppRun, or
+  `/opt/argyll-kde-wayland/bin` when run from source),
+  then `PATH`. A set directory is used even when it's wrong, so the error
+  shows instead of another ArgyllCMS being used silently.
+- The bundled ArgyllCMS's display system: `argyll_variant` (Wayland or
+  X11) when chosen in Preferences, passed as `ARGYLL_WINDOW_SYSTEM` to every
+  ArgyllCMS program (`argyll::set_window_system()`, a global read by
+  `argyll::command()`, since all of them must agree; set at startup and
+  when Preferences changes it). None, the default, sets nothing, leaving ArgyllCMS's own
+  detection, which is the same one Preferences shows. An "Other" ArgyllCMS
+  is never told.
+- Preferences (`Prefs`, `Source`): a radio button per bundled variant from
+  `system::current().variants()` (`Source::Bundled(window_system)`; on
+  Linux "Bundled ArgyllCMS (auto)", the default, with the display system
+  it detects shown beside it, then the two pinned ones; all disabled
+  without a bundled ArgyllCMS), and "Other ArgyllCMS" with a directory
+  (empty unless set; no placeholder, which would look like a default) and
+  Browse. Each change rechecks with `argyll::probe()` (a
+  `dispcal` that runs and reports a version) and
+  `argyll::check_platform_as()` for that choice, showing "This session: …"
+  and the supported / limited / unsupported line. A change that passes
+  the probe takes effect at once: saved (Auto as no `argyll_variant`),
+  and displays and instruments scanned again; choosing the one in use
+  rescans too. The directory field counts as a change when it loses focus
+  with a different path. A failing choice isn't applied, and the error
+  names the ArgyllCMS still in use. The controls are disabled during a
+  run. A settings file with only `argyll_bin` (from before)
+  loads as "Other". Browse
   uses rfd's XDG portal folder picker on its own thread, so the UI keeps
   drawing.
 - Inventory comes from parsing `dispcal -?`: the version line, the `-d`
-  display list, the `-c` instrument list (entries without a parenthesised
+  display list (after ` -d n[,m] `, which is how every current Linux build
+  of ArgyllCMS prints it, including the bundled one with or without X11, or
+  ` -d n `, from older Wayland-only builds of the fork and from Windows and
+  macOS builds, which "Other" may point at), the `-c` instrument list (entries without a parenthesised
   description are bare serial ports Argyll lists whether or not anything is
   attached, and are dropped), and the `-y` display types (either an
   instrument specific list on following lines, or the `Other: l = LCD, c =
@@ -283,9 +327,14 @@ version. The sources are mounted read-only and copied as git sees them
 (tracked and new files, not ignored ones), so host build output, ArgyllCMS's
 in-tree objects in particular, doesn't get linked in. ArgyllCMS is built
 with `-sBUILTIN_TIFF/JPEG/PNG/Z/SSL=true`, as its own release script does,
-leaving only libwayland-client and libdbus as dependencies; its Wayland
-protocol definitions come with it (`wlproto/` in the fork), as Ubuntu
-24.04's are too old. DisplayCraft is built with
+leaving libwayland-client, libdbus and libX11 (with libxcb) as system
+dependencies. The X extension libraries it also links (libXext, libXxf86vm,
+libXinerama, libXrandr, libXrender, libXss), which a Wayland-only system
+may lack, are bundled in `usr/lib/argyll/lib` and found through an
+`$ORIGIN/../lib` rpath set with patchelf, not `LD_LIBRARY_PATH`, which
+DisplayCraft would pass on to every program it starts. Its Wayland protocol
+definitions come with it (`wlproto/` in the fork), as Ubuntu 24.04's are
+too old. DisplayCraft is built with
 rustup's stable Rust. The AppDir holds `usr/bin/displaycraft`, eleven
 ArgyllCMS programs in `usr/lib/argyll/bin` (those DisplayCraft runs, plus
 spotread, ccxxmake, oeminst and iccdump), the vendor corrections in
@@ -306,9 +355,7 @@ build, kept as an artifact for two weeks; pushing a `v*` tag publishes a
 GitHub release with the AppImage (`gh release create`, with generated
 notes). Rust's build output and appimagetool are cached, keyed on
 `Cargo.lock`. Other platforms are meant to be further jobs attaching to the
-same release. The sidebar
-says "inside the AppImage" for the bundled ArgyllCMS, whose mount point
-changes every run.
+same release.
 
 Built so far: 17.5 MB, needing glibc 2.39 at most; the bundled ArgyllCMS
 programs need only libwayland-client and libdbus. Started here with fresh
@@ -531,7 +578,7 @@ KWin keeps the path but switches to sRGB.
   off): placed as arranged, HDMI listed as off; clicking eDP-1 and DP-3 in
   the map selected each.
 
-Not yet tested by hand: the Preferences page (Browse, Apply), and
+Not yet tested by hand: the Preferences page (Browse, changing the choice), and
 the correction list and Browse on the Spectro page, Export CSV, and the
 Measure and Cancel buttons while measuring, the Profiles page's buttons
 (clicked), and deleting a profile, and anything with a second monitor

@@ -8,6 +8,7 @@ mod profiles;
 mod report;
 mod session;
 mod settings;
+mod system;
 mod targets;
 mod theme;
 mod usbaccess;
@@ -21,7 +22,7 @@ fn icon() -> egui::IconData {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("DisplayCraft")
+            .with_title(concat!("DisplayCraft ", env!("CARGO_PKG_VERSION")))
             .with_app_id("displaycraft")
             // Wayland takes the icon from the installed desktop entry
             // matching the app id; this covers running uninstalled
@@ -31,12 +32,13 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     // Whether ArgyllCMS can run here is checked once the window is up (see
-    // App::refresh_inventory). The window itself needs Wayland, so without
-    // it there's nowhere to say so but the terminal and dialog tools.
+    // App::refresh_inventory). The window itself needs Wayland or X11, so
+    // without them there's nowhere to say so but the terminal and dialog
+    // tools.
     let result = eframe::run_native("displaycraft", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))));
     if let Err(e) = &result {
         session::report_without_window(&format!(
-            "DisplayCraft couldn't open its window ({e}). It needs KDE Plasma on Wayland."
+            "DisplayCraft couldn't open its window ({e}). It needs a Wayland or X11 desktop session."
         ));
     }
     result

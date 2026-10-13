@@ -16,17 +16,26 @@ and switches, removes or deletes them.
 
 The measuring is done by ArgyllCMS, which DisplayCraft runs as separate
 programs. On KDE Plasma under Wayland it needs the Wayland build of ArgyllCMS,
-which shows test patches and loads calibrations through KWin.
+which shows test patches and loads calibrations through KWin. That build
+also keeps ArgyllCMS's X11 support, used on X11 sessions and, through
+XWayland, on other Wayland desktops.
 
 DisplayCraft is not affiliated with ArtCraft.
 
 ## Requirements
 
-- KDE Plasma on Wayland. ArgyllCMS checks this when DisplayCraft starts, and
-  DisplayCraft won't run anywhere it reports the platform as unsupported.
-- ArgyllCMS. Its directory can be set in Preferences; otherwise it's looked
-  for in `DISPLAYCRAFT_ARGYLL_BIN`, `/opt/argyll-kde-wayland/bin`, then on
-  `PATH`.
+- KDE Plasma on Wayland, which is what DisplayCraft is developed and tested
+  on. X11 sessions (Plasma, GNOME) and other Wayland desktops should work
+  through ArgyllCMS's X11 support, but haven't been tried yet; the display
+  map and which profile is in use come from KDE. ArgyllCMS checks the
+  platform when DisplayCraft starts, and DisplayCraft won't run anywhere it
+  reports the platform as unsupported.
+- ArgyllCMS. The AppImage comes with its own, which works with KDE Plasma on
+  Wayland or with X11. It finds out which of the two this session calls for
+  when DisplayCraft starts; Preferences shows what it found, and can set it
+  to one of them, or to another ArgyllCMS installed elsewhere. Run from
+  source, the bundled ArgyllCMS is the one in `DISPLAYCRAFT_ARGYLL_BIN` or
+  `/opt/argyll-kde-wayland/bin`.
 - A supported measuring instrument, with permission to access it (the
   distribution's ArgyllCMS package installs the udev rule for this).
 - Rust 1.95 or later to build.
@@ -51,7 +60,7 @@ preferences in `~/.config/displaycraft/settings.toml`.
 `packaging/appimage/build.sh` builds a single AppImage containing
 DisplayCraft and the Wayland build of ArgyllCMS, in an Ubuntu 24.04
 container (podman or docker), so it runs on any distribution with KDE
-Plasma 6.4 or later. The Wayland ArgyllCMS is the `argyllcms` submodule
+Plasma 6.4 or later, or with an X server or XWayland. The Wayland ArgyllCMS is the `argyllcms` submodule
 ([bson/ArgyllCMS](https://github.com/bson/ArgyllCMS)):
 
     git submodule update --init

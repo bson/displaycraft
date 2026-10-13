@@ -7,13 +7,14 @@ use std::sync::mpsc::Receiver;
 use egui::{Align, Layout, RichText, ScrollArea};
 
 use crate::adjust::{self, Dir};
-use crate::argyll::{self, Event, Inventory, Job};
+use crate::argyll::{self, Event, Inventory, Job, Platform, Session, WindowSystem};
 use crate::charts;
 use crate::corrections::{self, Correction};
 use crate::layout;
 use crate::profiles;
 use crate::report;
 use crate::settings::Settings;
+use crate::system;
 use crate::targets::{ProfileType, Quality, Targets, Tone, White};
 use crate::usbaccess;
 use crate::verify;
@@ -154,12 +155,24 @@ struct Outcome {
     installed: bool,
 }
 
+/// Which ArgyllCMS Preferences has chosen
+#[derive(Clone, Copy, PartialEq)]
+enum Source {
+    /// The bundled one, told to use this display system, or with None,
+    /// left to choose (see system::Variant)
+    Bundled(Option<WindowSystem>),
+    Other,
+}
+
 /// The Preferences window's unapplied state.
 struct Prefs {
-    custom: bool,
+    source: Source,
+    /// The other ArgyllCMS's directory
     path: String,
-    /// The last check of `path`: ArgyllCMS version, or what's wrong.
+    /// The last check of the choice: ArgyllCMS version, or what's wrong.
     check: Option<Result<String, String>>,
+    /// And what that ArgyllCMS made of this session
+    session: Option<Session>,
     /// A folder picker running on its own thread.
     picker: Option<Receiver<Option<PathBuf>>>,
 }
@@ -167,31 +180,54 @@ struct Prefs {
 impl Prefs {
     fn from_settings(settings: &Settings) -> Prefs {
         let mut prefs = Prefs {
-            custom: settings.argyll_bin.is_some(),
-            path: settings
-                .argyll_bin
-                .clone()
-                .or_else(argyll::auto_bin_dir)
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
+            source: match &settings.argyll_bin {
+                Some(_) => Source::Other,
+                None => Source::Bundled(settings.argyll_variant),
+            },
+            path: settings.argyll_bin.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             check: None,
+            session: None,
             picker: None,
         };
         prefs.recheck();
         prefs
     }
 
-    fn chosen(&self) -> Option<PathBuf> {
+    fn other_dir(&self) -> Option<PathBuf> {
         let path = self.path.trim();
-        (self.custom && !path.is_empty()).then(|| PathBuf::from(path))
+        (!path.is_empty()).then(|| PathBuf::from(path))
     }
 
+    /// The directory the choice amounts to
+    fn dir(&self) -> Option<PathBuf> {
+        match self.source {
+            Source::Bundled(_) => system::current().bundled_dir(),
+            Source::Other => self.other_dir(),
+        }
+    }
+
+    /// Check the chosen ArgyllCMS, and ask it about the session.
     fn recheck(&mut self) {
-        let dir = if self.custom { self.chosen() } else { argyll::auto_bin_dir() };
-        self.check = Some(match dir {
-            Some(dir) => argyll::probe(&dir),
-            None => Err("ArgyllCMS wasn't found".into()),
-        });
+        let Some(dir) = self.dir() else {
+            self.check = Some(Err(match self.source {
+                Source::Bundled(_) => system::current().no_bundled().into(),
+                Source::Other => "Choose the directory holding the ArgyllCMS programs".into(),
+            }));
+            self.session = None;
+            return;
+        };
+        self.check = Some(argyll::probe(&dir));
+        // Another ArgyllCMS is left to choose for itself, like Auto
+        let session = argyll::check_platform_as(&dir, self.variant());
+        self.session = Some(session);
+    }
+
+    /// The bundled variant to pin, or None to follow detection
+    fn variant(&self) -> Option<WindowSystem> {
+        match self.source {
+            Source::Bundled(v) => v,
+            Source::Other => None,
+        }
     }
 }
 
@@ -256,7 +292,7 @@ struct ProfilesView {
 
 /// What a background scan found
 struct Scan {
-    platform: argyll::Platform,
+    session: Session,
     inventory: Result<Inventory, String>,
     /// KDE's arrangement of the outputs, if kscreen-doctor answered
     layout: Vec<layout::Output>,
@@ -276,7 +312,8 @@ pub struct App {
     prefs: Option<Prefs>,
     bin: Option<PathBuf>,
     /// What ArgyllCMS says about this session (None until it's been found)
-    platform: Option<argyll::Platform>,
+    /// What ArgyllCMS made of this session, once asked
+    session: Option<Session>,
     inventory: Inventory,
     inventory_error: Option<String>,
     theme: ThemeKind,
@@ -338,6 +375,7 @@ impl App {
         theme::apply_kind(&cc.egui_ctx, theme);
         let mut settings = settings;
         settings.targets.settle();
+        Self::tell_window_system(&settings);
         let mut app = App {
             ctx: cc.egui_ctx.clone(),
             scan: None,
@@ -346,7 +384,7 @@ impl App {
             bin: argyll::find_bin_dir(settings.argyll_bin.as_deref()),
             settings,
             prefs: None,
-            platform: None,
+            session: None,
             inventory: Inventory::default(),
             inventory_error: None,
             theme,
@@ -386,12 +424,19 @@ impl App {
         app
     }
 
+    /// The bundled ArgyllCMS's display system, if one was chosen in
+    /// Preferences. Otherwise ArgyllCMS's own detection, which is what
+    /// DisplayCraft would have chosen too.
+    fn tell_window_system(settings: &Settings) {
+        argyll::set_window_system(if settings.argyll_bin.is_none() { settings.argyll_variant } else { None });
+    }
+
     /// Identify what can be measured: first whether ArgyllCMS supports this
     /// session at all, then the displays and instruments.
     fn refresh_inventory(&mut self) {
         let Some(bin) = self.bin.clone() else {
             self.scan = None;
-            self.platform = None;
+            self.session = None;
             self.inventory = Inventory::default();
             self.inventory_error = Some("ArgyllCMS wasn't found. Set its directory in Preferences.".into());
             return;
@@ -402,16 +447,16 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
-            let platform = argyll::check_platform(&bin);
-            let inventory = match platform {
-                argyll::Platform::Unsupported(_) => Ok(Inventory::default()),
+            let session = argyll::check_platform(&bin);
+            let inventory = match session.platform {
+                Platform::Unsupported(_) => Ok(Inventory::default()),
                 _ => argyll::inventory(&bin).map_err(|e| {
                     format!("Couldn't run dispcal in {}: {e}. Check the ArgyllCMS directory in Preferences.", bin.display())
                 }),
             };
             let layout = layout::read().unwrap_or_default();
             let blocked = usbaccess::blocked();
-            let _ = tx.send(Scan { platform, inventory, layout, blocked });
+            let _ = tx.send(Scan { session, inventory, layout, blocked });
             ctx.request_repaint();
         });
         self.scan = Some(rx);
@@ -422,7 +467,7 @@ impl App {
         let Some(rx) = &self.scan else { return };
         let Ok(scan) = rx.try_recv() else { return };
         self.scan = None;
-        self.platform = Some(scan.platform);
+        self.session = Some(scan.session);
         self.layout = scan.layout;
         self.blocked = scan.blocked;
         match scan.inventory {
@@ -441,15 +486,15 @@ impl App {
     }
 
     fn unsupported(&self) -> Option<&str> {
-        match &self.platform {
-            Some(argyll::Platform::Unsupported(why)) => Some(why),
+        match self.session.as_ref().map(|s| &s.platform) {
+            Some(Platform::Unsupported(why)) => Some(why),
             _ => None,
         }
     }
 
     fn ready(&self) -> Result<(), &'static str> {
         if self.scan.is_some() {
-            Err("Looking for displays and instruments…")
+            Err("Looking for displays and spectros…")
         } else if self.unsupported().is_some() {
             Err("ArgyllCMS can't run on this platform")
         } else if self.inventory.displays.is_empty() {
@@ -587,7 +632,7 @@ impl App {
     fn looking(ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label("Looking for displays and instruments…");
+            ui.label("Looking for displays and spectros…");
         });
     }
 
@@ -877,14 +922,6 @@ impl App {
         }
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let t = Tokens::get(ui.ctx());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(concat!("DisplayCraft ", env!("CARGO_PKG_VERSION"))).font(t.semibold(15.0)).color(t.text));
-
-        });
-    }
-
     fn set_theme(&mut self, ctx: &egui::Context, kind: ThemeKind) {
         if kind == self.theme {
             return;
@@ -907,66 +944,115 @@ impl App {
         let t = Tokens::get(&ctx);
         let running = self.job.is_some();
 
+        // Set when the ArgyllCMS choice changes; it takes effect at once if
+        // it passes its check
+        let mut changed = false;
+
         // Folder picker result from its thread
         if let Some(rx) = &prefs.picker {
             if let Ok(picked) = rx.try_recv() {
                 prefs.picker = None;
                 if let Some(dir) = picked {
-                    prefs.custom = true;
+                    prefs.source = Source::Other;
                     prefs.path = dir.display().to_string();
                     prefs.recheck();
+                    changed = true;
                 }
             }
         }
 
-        let mut apply = false;
         let mut theme = self.theme;
         ui.heading("Preferences");
         Self::gap(ui);
-        ui.label("Where ArgyllCMS is, and how DisplayCraft looks. The ArgyllCMS directory takes effect when applied; the theme at once.");
+        ui.label("Which ArgyllCMS to use, and how DisplayCraft looks. Changes take effect at once.");
         Self::gap(ui);
         {
                 ui.label(RichText::new("ArgyllCMS programs").font(t.semibold(13.0)).color(t.text));
                 ui.add_space(4.0);
-                let auto = argyll::auto_bin_dir().map(|d| d.display().to_string()).unwrap_or_else(|| "not found".into());
-                if ui.radio(!prefs.custom, format!("Find automatically ({auto})")).clicked() {
-                    prefs.custom = false;
-                    prefs.recheck();
+                if let Some(session) = prefs.session.as_ref().filter(|s| s.automatic.is_some()) {
+                    ui.label(RichText::new(format!("This session: {}", session.describe())).color(t.text_dim));
+                    ui.add_space(4.0);
                 }
-                if ui.radio(prefs.custom, "Use this directory:").clicked() {
-                    prefs.custom = true;
-                    prefs.recheck();
+                if running {
+                    ui.label(RichText::new("Can't change while a calibration runs").color(t.text_dim));
                 }
-                ui.horizontal(|ui| {
-                    ui.add_space(18.0);
-                    let edit = ui.add_enabled(
-                        prefs.custom,
-                        egui::TextEdit::singleline(&mut prefs.path).desired_width(300.0).hint_text("/opt/argyll-kde-wayland/bin"),
-                    );
-                    if edit.lost_focus() {
-                        prefs.recheck();
-                    }
-                    let browsing = prefs.picker.is_some();
-                    if ui.add_enabled(!browsing, egui::Button::new("Browse…")).clicked() {
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        let start = prefs.chosen().filter(|p| p.is_dir());
-                        let ctx = ctx.clone();
-                        std::thread::spawn(move || {
-                            let mut dialog = rfd::FileDialog::new().set_title("ArgyllCMS programs directory");
-                            if let Some(dir) = start {
-                                dialog = dialog.set_directory(dir);
+                ui.add_enabled_ui(!running, |ui| {
+                    let bundled = system::current().bundled_dir();
+                    // What auto amounts to, once the bundled ArgyllCMS has said
+                    let detected = prefs.session.as_ref().filter(|_| prefs.source == Source::Bundled(None)).and_then(|s| s.automatic);
+                    for variant in system::current().variants() {
+                        let (source, label) = (Source::Bundled(variant.window_system), variant.label);
+                        ui.horizontal(|ui| {
+                            let radio = ui.add_enabled(bundled.is_some(), egui::RadioButton::new(prefs.source == source, label));
+                            if radio.clicked() {
+                                prefs.source = source;
+                                prefs.recheck();
+                                changed = true;
                             }
-                            let _ = tx.send(dialog.pick_folder());
-                            ctx.request_repaint();
+                            if let Some(dir) = &bundled {
+                                radio.on_hover_text(dir.display().to_string());
+                            }
+                            if let (Source::Bundled(None), Some(ws)) = (source, detected) {
+                                ui.label(RichText::new(format!("uses {}", ws.label())).color(t.text_dim));
+                            }
                         });
-                        prefs.picker = Some(rx);
                     }
+                    if ui.radio(prefs.source == Source::Other, "Other ArgyllCMS, in this directory:").clicked() {
+                        prefs.source = Source::Other;
+                        prefs.recheck();
+                        changed = true;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0);
+                        let other = prefs.source == Source::Other;
+                        let edit = ui.add_enabled(
+                            other,
+                            egui::TextEdit::singleline(&mut prefs.path).desired_width(300.0),
+                        );
+                        if edit.lost_focus() && prefs.other_dir() != self.settings.argyll_bin {
+                            prefs.recheck();
+                            changed = true;
+                        }
+                        let browsing = prefs.picker.is_some();
+                        if ui.add_enabled(other && !browsing, egui::Button::new("Browse…")).clicked() {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            let start = prefs.other_dir().filter(|p| p.is_dir());
+                            let ctx = ctx.clone();
+                            std::thread::spawn(move || {
+                                let mut dialog = rfd::FileDialog::new().set_title("ArgyllCMS programs directory");
+                                if let Some(dir) = start {
+                                    dialog = dialog.set_directory(dir);
+                                }
+                                let _ = tx.send(dialog.pick_folder());
+                                ctx.request_repaint();
+                            });
+                            prefs.picker = Some(rx);
+                        }
+                    });
                 });
+                ui.add_space(4.0);
                 match &prefs.check {
                     Some(Ok(version)) => ui.label(RichText::new(format!("Found ArgyllCMS {version}")).color(t.good)),
-                    Some(Err(why)) => ui.label(RichText::new(why).color(t.bad)),
+                    Some(Err(why)) => {
+                        let still = match &self.bin {
+                            Some(bin) => format!(". Still using {}.", bin.display()),
+                            None => String::new(),
+                        };
+                        ui.label(RichText::new(format!("{why}{still}")).color(t.bad))
+                    }
                     None => ui.label(""),
                 };
+                if prefs.check.as_ref().is_some_and(|c| c.is_ok()) {
+                    match prefs.session.as_ref().map(|s| &s.platform) {
+                        Some(Platform::Supported(what)) => ui.label(RichText::new(format!("Supported: {what}")).color(t.good)),
+                        Some(Platform::Limited(what)) => ui.label(RichText::new(format!("Limited: {what}")).color(t.caution)),
+                        Some(Platform::Unsupported(why)) => ui.label(RichText::new(format!("Not supported: {why}")).color(t.bad)),
+                        Some(Platform::Unknown) => ui.label(
+                            RichText::new("This ArgyllCMS can't say whether it supports this session").color(t.caution),
+                        ),
+                        None => ui.label(""),
+                    };
+                }
 
                 Self::gap(ui);
                 ui.label(RichText::new("Appearance").font(t.semibold(13.0)).color(t.text));
@@ -979,34 +1065,23 @@ impl App {
                         }
                     });
                 });
-
-                Self::gap(ui);
-                ui.horizontal(|ui| {
-                    let ok = prefs.check.as_ref().is_some_and(|c| c.is_ok());
-                    let button = ui.add_enabled(!running && ok, egui::Button::new(RichText::new("Apply").font(t.semibold(13.0))));
-                    if button.clicked() {
-                        apply = true;
-                    }
-                    if running {
-                        ui.label(RichText::new("Can't change while a calibration runs").color(t.text_dim));
-                    }
-                });
         }
 
         // The theme applies at once, so it can be judged by eye
         self.set_theme(&ctx, theme);
 
-        if apply {
-            self.settings.argyll_bin = prefs.chosen();
+        // Every change rescans displays and instruments, even choosing the
+        // one already in use, which is a way to look again
+        if changed && !running && prefs.check.as_ref().is_some_and(|c| c.is_ok()) {
+            self.settings.argyll_bin = if prefs.source == Source::Other { prefs.other_dir() } else { None };
+            self.settings.argyll_variant = prefs.variant();
+            Self::tell_window_system(&self.settings);
             self.save_settings();
             self.bin = argyll::find_bin_dir(self.settings.argyll_bin.as_deref());
             self.corrections = corrections::find(self.bin.as_deref());
             self.refresh_inventory();
         }
-        // Applying starts over from the saved settings
-        if !apply {
-            self.prefs = Some(prefs);
-        }
+        self.prefs = Some(prefs);
     }
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
@@ -1041,13 +1116,6 @@ impl App {
         }
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.add_space(8.0);
-            if let Some(bin) = &self.bin {
-                // The AppImage's mount point changes every run, so its own
-                // ArgyllCMS is named rather than shown by path
-                let inside = std::env::var_os("APPDIR").is_some_and(|d| bin.starts_with(d));
-                let text = if inside { "inside the AppImage".to_string() } else { bin.display().to_string() };
-                ui.label(RichText::new(text).small().color(t.text_dim)).on_hover_text(bin.display().to_string());
-            }
             if !self.inventory.version.is_empty() {
                 ui.label(RichText::new(format!("ArgyllCMS {}", self.inventory.version)).small().color(t.text_dim));
             }
@@ -1068,9 +1136,16 @@ impl App {
         ui.add_space(6.0);
         ui.label("ArgyllCMS can't show test patches or load calibrations in this session:");
         ui.label(RichText::new(why).color(t.bad));
+        if let Some(session) = self.session.as_ref().filter(|s| s.automatic.is_some()) {
+            ui.label(RichText::new(format!("This session: {}", session.describe())).color(t.text_dim));
+        }
         ui.add_space(6.0);
         ui.label(
-            RichText::new("DisplayCraft needs KDE Plasma on Wayland, with the Wayland build of ArgyllCMS.").color(t.text_dim),
+            RichText::new(
+                "DisplayCraft needs KDE Plasma on Wayland, or an X11 session (GNOME, KDE or others), with the \
+                 ArgyllCMS it comes with. In Preferences, the bundled ArgyllCMS can be set to the other of the two.",
+            )
+            .color(t.text_dim),
         );
         if let Some(bin) = &self.bin {
             ui.label(RichText::new(format!("Checked with {}", bin.join("dispwin").display())).small().color(t.text_dim));
@@ -2589,25 +2664,24 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let t = Tokens::get(&ctx);
 
-        egui::Panel::top("top").exact_size(42.0).show(ui, |ui| {
-            ui.add_space(8.0);
-            self.top_bar(ui);
-        });
         egui::Panel::left("steps").exact_size(t.panel_w).resizable(false).show(ui, |ui| self.sidebar(ui));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.canvas).inner_margin(16)).show(ui, |ui| {
             if let Some(why) = self.unsupported().map(str::to_string).filter(|_| self.step != Step::Preferences) {
                 self.page_unsupported(ui, &why);
                 return;
             }
-            if self.platform == Some(argyll::Platform::Unknown) {
-                ui.label(
-                    RichText::new(
-                        "This ArgyllCMS can't say whether it supports this platform, so it's probably not the \
-                         Wayland build: test patches and calibrations may be wrong. Set the Wayland build's \
-                         directory in Preferences.",
-                    )
-                    .color(t.caution),
-                );
+            let caution = match self.session.as_ref().map(|s| &s.platform) {
+                Some(Platform::Unknown) => Some(
+                    "This ArgyllCMS can't say whether it supports this session, so it's not the one DisplayCraft \
+                     comes with: test patches and calibrations may be wrong. Choose the bundled ArgyllCMS in \
+                     Preferences."
+                        .to_string(),
+                ),
+                Some(Platform::Limited(why)) => Some(format!("Measurements may be wrong here. ArgyllCMS uses {why}.")),
+                _ => None,
+            };
+            if let Some(text) = caution.filter(|_| self.step != Step::Preferences) {
+                ui.label(RichText::new(text).color(t.caution));
                 ui.add_space(8.0);
             }
             if let Some(err) = &self.inventory_error {

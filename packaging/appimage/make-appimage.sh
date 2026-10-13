@@ -31,12 +31,14 @@ sudo=$([ "$(id -u)" = 0 ] || echo sudo)
 export DEBIAN_FRONTEND=noninteractive
 $sudo apt-get update -qq
 # No devel packages for TIFF, JPEG, PNG, zlib or SSL: ArgyllCMS builds its
-# own copies in, so its programs need only libwayland-client and libdbus,
-# which every Plasma system has. Its Wayland protocol definitions come with
-# it (wlproto/), as Ubuntu 24.04's are too old.
+# own copies in. Its programs need libwayland-client, libdbus and libX11
+# from the system, which every desktop with Wayland or X has, and the X
+# extension libraries bundled below. Its Wayland protocol definitions come
+# with it (wlproto/), as Ubuntu 24.04's are too old.
 $sudo apt-get install -y -qq --no-install-recommends \
     build-essential jam pkg-config libwayland-dev libdbus-1-dev \
-    curl ca-certificates git file >/dev/null
+    libx11-dev libxext-dev libxxf86vm-dev libxinerama-dev libxrandr-dev libxss-dev \
+    patchelf curl ca-certificates git file >/dev/null
 
 # Rust: an installed rustup (as on GitHub's runners), or one kept in the cache
 if ! command -v rustup >/dev/null; then
@@ -86,6 +88,22 @@ for p in dispcal dispread dispwin targen colprof fakeread colverify spotread ccx
     cp "$WORK/argyll/bin/$p" "$app/usr/lib/argyll/bin/"
 done
 strip "$app"/usr/lib/argyll/bin/* "$app/usr/bin/displaycraft"
+# X extension libraries, which a Wayland-only system may lack. Found through
+# an rpath rather than LD_LIBRARY_PATH in AppRun, which DisplayCraft would
+# pass on to every program it starts. libX11 and libxcb aren't bundled
+# (AppImage practice): the system's must match its X server.
+mkdir -p "$app/usr/lib/argyll/lib"
+for l in libXext.so.6 libXxf86vm.so.1 libXinerama.so.1 libXrandr.so.2 libXrender.so.1 libXss.so.1; do
+    cp -L "$(ldconfig -p | awk -v l="$l" '$1 == l && /x86-64/ { print $NF; exit }')" "$app/usr/lib/argyll/lib/"
+done
+for f in "$app"/usr/lib/argyll/bin/*; do
+    patchelf --set-rpath '$ORIGIN/../lib' "$f"
+done
+# A runpath only serves the file's own dependencies, so libXrandr needs one
+# to find libXrender
+for f in "$app"/usr/lib/argyll/lib/*; do
+    patchelf --set-rpath '$ORIGIN' "$f"
+done
 # Vendor colorimeter corrections; DisplayCraft looks beside the bin folder
 cp -a "$WORK/argyll/ref" "$app/usr/lib/argyll/ref"
 cp -a assets/icons "$app/usr/share/"

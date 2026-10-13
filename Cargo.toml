@@ -7,7 +7,7 @@ description = "Display calibration and profiling for KDE Plasma on Wayland, usin
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "default_fonts"] }
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "x11", "default_fonts"] }
 egui = "0.36"
 # Image loading for the logo
 egui_extras = { version = "0.36", default-features = false, features = ["image"] }

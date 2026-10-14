@@ -94,7 +94,7 @@ fn told(mut cmd: Command) -> Command {
 /// with `dispwin -Q`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Platform {
-    /// With a description, e.g. "KDE Plasma (KWin) on Wayland"
+    /// With a description, e.g. "KDE Plasma on Wayland"
     Supported(String),
     /// It runs, with the limitations given, e.g. through XWayland
     Limited(String),
@@ -112,7 +112,7 @@ pub enum Platform {
 pub struct Session {
     /// $XDG_CURRENT_DESKTOP, e.g. "KDE" or "GNOME"
     pub desktop: Option<String>,
-    /// e.g. "KWin" or "GNOME Shell", or "none" outside Wayland
+    /// e.g. "KDE" (ArgyllCMS's "KWin") or "GNOME Shell", or "none" outside Wayland
     pub compositor: Option<String>,
     /// e.g. "Xorg :0" or "XWayland :0", or "none"
     pub x11_server: Option<String>,
@@ -125,26 +125,54 @@ pub struct Session {
 }
 
 impl Session {
-    /// e.g. "KDE, Wayland compositor KWin, X server XWayland :0"
+    /// e.g. "KDE on Wayland, with XWayland :0", "GNOME on X11 (Xorg :0,
+    /// window manager GNOME Shell)" or "Wayland (Sway)"
     pub fn describe(&self) -> String {
         let known = |v: &Option<String>| v.clone().filter(|v| v != "none" && v != "unknown");
-        let mut parts = Vec::new();
-        if let Some(d) = known(&self.desktop) {
-            parts.push(d);
-        }
-        if let Some(c) = known(&self.compositor) {
-            parts.push(format!("Wayland compositor {c}"));
-        }
-        if let Some(x) = known(&self.x11_server) {
-            match known(&self.x11_window_manager) {
-                Some(wm) if self.compositor.as_deref().is_none_or(|c| c == "none") => {
-                    parts.push(format!("X server {x}, window manager {wm}"))
+        let desktop = known(&self.desktop);
+        let text = match (known(&self.compositor), known(&self.x11_server)) {
+            (Some(c), x) => {
+                // Named once when the compositor is the desktop's own
+                let mut t = match &desktop {
+                    Some(d) if c.contains(d.as_str()) || d.contains(c.as_str()) => format!("{d} on Wayland"),
+                    Some(d) => format!("{d} on Wayland ({c})"),
+                    None => format!("Wayland ({c})"),
+                };
+                if let Some(x) = x {
+                    t += &format!(", with {x}");
                 }
-                _ => parts.push(format!("X server {x}")),
+                t
             }
-        }
-        if parts.is_empty() { "unknown".into() } else { parts.join(", ") }
+            (None, Some(x)) => {
+                let wm = known(&self.x11_window_manager).map(|w| format!(", window manager {w}")).unwrap_or_default();
+                match &desktop {
+                    Some(d) => format!("{d} on X11 ({x}{wm})"),
+                    None => format!("X11 ({x}{wm})"),
+                }
+            }
+            (None, None) => desktop.unwrap_or_else(|| "unknown".into()),
+        };
+        text
     }
+}
+
+/// ArgyllCMS's wording for what DisplayCraft shows: KWin is called KDE
+fn as_shown(text: &str) -> String {
+    text.replace("KDE Plasma (KWin)", "KDE Plasma").replace("KDE Plasma's KWin", "KDE Plasma").replace("KWin", "KDE")
+}
+
+/// The profile the system associates with display `display` (the `-d`
+/// value), as `dispwin -W` reports it: Some(None) if there's none, None if
+/// it couldn't say (e.g. an ArgyllCMS without -W).
+pub fn installed_profile(bin: &Path, display: &str) -> Option<Option<PathBuf>> {
+    let out = command(bin.join("dispwin")).args(["-d", display, "-W"]).stdin(Stdio::null()).output().ok()?;
+    parse_installed_profile(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_installed_profile(text: &str) -> Option<Option<PathBuf>> {
+    let value = text.lines().find_map(|l| l.strip_prefix("profile: "))?.trim();
+    // On X11 it can be the root window's atom name rather than a file
+    Some((value != "none").then(|| PathBuf::from(value)).filter(|p| p.is_absolute()))
 }
 
 /// Ask the ArgyllCMS in `bin` about this session, with the display system
@@ -191,7 +219,7 @@ fn parse_session(text: &str) -> Session {
     };
     for line in text.lines() {
         let Some((key, value)) = line.split_once(": ") else { continue };
-        let value = value.trim().to_string();
+        let value = as_shown(value.trim());
         match key {
             "desktop" => s.desktop = Some(value),
             "wayland compositor" => s.compositor = Some(value),
@@ -579,6 +607,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_installed_profile() {
+        assert_eq!(parse_installed_profile("profile: /Users/b/Library/ColorSync/Profiles/x.icc\n"),
+                   Some(Some(PathBuf::from("/Users/b/Library/ColorSync/Profiles/x.icc"))));
+        assert_eq!(parse_installed_profile("profile: none\n"), Some(None));
+        assert_eq!(parse_installed_profile("profile: _ICC_PROFILE\n"), Some(None));
+        assert_eq!(parse_installed_profile("usage: dispwin [options]\n"), None);
+    }
+
+    #[test]
     fn parses_platform_report() {
         let s = parse_session(
             "desktop: KDE\nwayland compositor: KWin\nx11 server: XWayland :0\nx11 window manager: KWin\n\
@@ -587,12 +624,14 @@ mod tests {
         );
         assert_eq!(s.desktop.as_deref(), Some("KDE"));
         assert_eq!((s.automatic, s.display_system), (Some(WindowSystem::Wayland), Some(WindowSystem::X11)));
-        assert_eq!(s.platform, Platform::Limited("X11 through XWayland :0 on KWin: the compositor may alter the test patch colors".into()));
-        assert_eq!(s.describe(), "KDE, Wayland compositor KWin, X server XWayland :0");
+        assert_eq!(s.platform, Platform::Limited("X11 through XWayland :0 on KDE: the compositor may alter the test patch colors".into()));
+        assert_eq!(s.describe(), "KDE on Wayland, with XWayland :0");
         let x = parse_session("desktop: GNOME\nwayland compositor: none\nx11 server: Xorg :0\nx11 window manager: GNOME Shell\n");
-        assert_eq!(x.describe(), "GNOME, X server Xorg :0, window manager GNOME Shell");
+        assert_eq!(x.describe(), "GNOME on X11 (Xorg :0, window manager GNOME Shell)");
         assert_eq!(parse_session("platform supported: KDE Plasma (KWin) on Wayland\n").platform,
-                   Platform::Supported("KDE Plasma (KWin) on Wayland".into()));
+                   Platform::Supported("KDE Plasma on Wayland".into()));
+        let lacks = parse_session("platform unsupported: the Wayland compositor lacks x, which only KDE Plasma's KWin provides together\n");
+        assert_eq!(lacks.platform, Platform::Unsupported("the Wayland compositor lacks x, which only KDE Plasma provides together".into()));
         assert_eq!(parse_session("platform unsupported: can't connect to a Wayland compositor\n").platform,
                    Platform::Unsupported("can't connect to a Wayland compositor".into()));
         // An older dispwin prints its usage for the unknown option

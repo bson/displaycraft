@@ -28,24 +28,11 @@ impl Correction {
 /// `argyll_bin` adds the `ref` folder beside the ArgyllCMS in use, where
 /// its install (and the AppImage) puts the vendor corrections.
 fn search_dirs(argyll_bin: Option<&Path>) -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|h| h.join(".local/share")));
-    let data_dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".into());
     let mut dirs = Vec::new();
     if let Some(parent) = argyll_bin.and_then(Path::parent) {
         dirs.push(parent.join("ref"));
     }
-    if let Some(d) = &data_home {
-        dirs.push(d.join("ArgyllCMS"));
-        // DisplayCAL downloads the vendor corrections here
-        dirs.push(d.join("DisplayCAL/dl"));
-    }
-    for d in data_dirs.split(':').filter(|d| !d.is_empty()) {
-        dirs.push(Path::new(d).join("ArgyllCMS"));
-    }
-    dirs.push("/usr/share/color/argyll/ref".into());
+    dirs.extend(crate::system::current().correction_dirs());
     dirs
 }
 

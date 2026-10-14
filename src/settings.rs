@@ -1,4 +1,5 @@
-//! Preferences kept between runs, in $XDG_CONFIG_HOME/displaycraft/settings.toml.
+//! Preferences kept between runs, in settings.toml in the system's config
+//! folder for DisplayCraft (System::config_dir).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -26,10 +27,7 @@ pub struct Settings {
 }
 
 fn path() -> Option<PathBuf> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(config.join("displaycraft").join("settings.toml"))
+    Some(crate::system::current().config_dir()?.join("settings.toml"))
 }
 
 impl Settings {

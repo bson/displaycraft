@@ -295,8 +295,12 @@ impl ProfileRow {
 
 /// What the Profiles page shows, read when it's opened and after changes
 struct ProfilesView {
+    /// The output name profiles are named after, e.g. "eDP-1"
     output: String,
-    color: Option<profiles::OutputColor>,
+    /// The display's name as shown, e.g. "eDP-1 (Sharp Corporation eDP-1)"
+    name: String,
+    /// The profile it uses: Some(None) none, None if the system didn't say
+    in_use: Option<Option<PathBuf>>,
     rows: Vec<ProfileRow>,
 }
 
@@ -676,11 +680,7 @@ impl App {
     }
 
     fn data_dir() -> std::io::Result<PathBuf> {
-        let data = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-            .ok_or_else(|| std::io::Error::other("no HOME"))?;
-        Ok(data.join("displaycraft"))
+        system::current().data_dir().ok_or_else(|| std::io::Error::other("no home folder"))
     }
 
     /// Profiles DisplayCraft made, newest first.
@@ -917,8 +917,10 @@ impl App {
             }
             JobKind::UseProfile | JobKind::StopProfile => {
                 self.status = match (ok, kind) {
-                    (true, JobKind::UseProfile) => Some((true, "KWin now uses this profile for the display.".into())),
-                    (true, _) => Some((true, "The display no longer uses a profile; KWin treats it as sRGB.".into())),
+                    (true, JobKind::UseProfile) => {
+                        Some((true, format!("{} now uses this profile for the display.", system::current().color_manager())))
+                    }
+                    (true, _) => Some((true, format!("The display no longer uses a profile. {}", system::current().without_profile()).trim_end().to_string())),
                     (false, _) => Some((false, "Changing the profile failed. See the log.".into())),
                 };
                 self.refresh_profiles();
@@ -929,7 +931,7 @@ impl App {
                         o.installed = true;
                         self.verify_profile = Some(o.icc.clone());
                     }
-                    self.status = Some((true, "Profile installed. KWin now uses it on the display.".into()));
+                    self.status = Some((true, format!("Profile installed. {} now uses it on the display.", system::current().color_manager())));
                 } else {
                     self.status = Some((false, "Installing the profile failed. See the log.".into()));
                 }
@@ -1734,20 +1736,6 @@ impl App {
     }
 
     fn page_run(&mut self, ui: &mut egui::Ui) {
-        // While a run goes, Cancel stays at the foot of the page, whatever
-        // is shown above it
-        if self.job.is_some() {
-            ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                self.cancel_button(ui);
-                Self::gap(ui);
-                ui.with_layout(Layout::top_down(Align::Min), |ui| self.page_run_body(ui));
-            });
-        } else {
-            self.page_run_body(ui);
-        }
-    }
-
-    fn page_run_body(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::get(ui.ctx());
         ui.heading("Measurement");
         Self::gap(ui);
@@ -1782,6 +1770,12 @@ impl App {
             }
         }
 
+        // While a run goes, Cancel sits above the Log, so opening the Log
+        // doesn't push it out of reach
+        if running {
+            Self::gap(ui);
+            self.cancel_button(ui);
+        }
         Self::gap(ui);
         egui::CollapsingHeader::new("Log").default_open(false).show(ui, |ui| self.log_view(ui, f32::INFINITY));
     }
@@ -1920,7 +1914,7 @@ impl App {
             };
             if made { row.made = Some(path) } else { row.installed = Some(path) }
         };
-        if let Some(dir) = profiles::installed_dir() {
+        if let Some(dir) = system::current().installed_profiles_dir() {
             for p in profiles::list(&dir) {
                 add(p, false);
             }
@@ -1933,8 +1927,13 @@ impl App {
         // This display's first, then the rest, each newest first
         let other = |r: &ProfileRow| r.made_for.as_deref().is_some_and(|o| o != output);
         rows.sort_by(|a, b| other(a).cmp(&other(b)).then(b.info.created.cmp(&a.info.created)));
-        let color = if output.is_empty() { None } else { profiles::output_color(&output) };
-        self.profiles_view = Some(ProfilesView { output, color, rows });
+        let display = self.inventory.displays.get(self.display).map(|d| d.value.clone());
+        let in_use = match (&self.bin, display) {
+            (Some(bin), Some(d)) if !output.is_empty() => system::current().profile_in_use(bin, &d, &output),
+            _ => None,
+        };
+        let name = self.display_label().unwrap_or_default();
+        self.profiles_view = Some(ProfilesView { output, name, in_use, rows });
     }
 
     fn page_profiles(&mut self, ui: &mut egui::Ui) {
@@ -1968,19 +1967,18 @@ impl App {
         }
         let manageable = self.scan.is_none() && self.unsupported().is_none() && !self.inventory.displays.is_empty();
         let Some(view) = &self.profiles_view else { return };
-        let active = view.color.as_ref().and_then(|c| c.active()).map(PathBuf::from);
+        let active = view.in_use.clone().flatten();
+        let manager = system::current().color_manager();
         let same = |a: &std::path::Path, b: &std::path::Path| {
             a == b || a.canonicalize().ok().is_some_and(|ca| b.canonicalize().ok().is_some_and(|cb| ca == cb))
         };
-        ui.label(format!(
-            "The profiles DisplayCraft made, and those installed for displays. KWin uses one for {} at a time.",
-            if view.output.is_empty() { "a display".to_string() } else { view.output.clone() }
-        ));
+        let display = if view.name.is_empty() { "a display".to_string() } else { view.name.clone() };
+        ui.label(format!("The profiles DisplayCraft made, and those installed for displays. {manager} uses one for {display} at a time."));
         Self::gap(ui);
-        match (&view.color, &active) {
-            (None, _) => ui.label(RichText::new(format!("KWin didn't say which profile {} uses.", view.output)).color(t.caution)),
+        match (&view.in_use, &active) {
+            (None, _) => ui.label(RichText::new(format!("{manager} didn't say which profile {display} uses.")).color(t.caution)),
             (Some(_), Some(p)) => ui.label(format!("In use: {}", p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default())),
-            (Some(_), None) => ui.label("In use: none. KWin treats the display as sRGB."),
+            (Some(_), None) => ui.label(format!("In use: none. {}", system::current().without_profile()).trim_end().to_string()),
         };
         Self::gap(ui);
 
@@ -2056,7 +2054,7 @@ impl App {
                     .add_enabled(manageable && !running, egui::Button::new("Use"))
                     .on_hover_text(match elsewhere {
                         Some(o) => format!("Measured on {o}; on this display its colors will be off"),
-                        None => "Make KWin use this profile for the display".into(),
+                        None => format!("Make {} use this profile for the display", system::current().color_manager()),
                     })
                     .clicked()
                 {
@@ -2750,14 +2748,19 @@ fn instrument_name(description: &str) -> &str {
     }
 }
 
-/// "Monitor 1, Output eDP-1 (Sharp ...) at 0, 0, ..." -> "eDP-1"
+/// What files for a display are named after: "Monitor 1, Output eDP-1
+/// (Sharp ...) at 0, 0, ..." -> "eDP-1". Descriptions without an output
+/// (macOS) use the display's name: "Built-in Display, at ..." ->
+/// "Built-in_Display".
 fn output_name(description: &str) -> String {
     let name = description
         .split(", ")
         .find_map(|part| part.strip_prefix("Output "))
         .and_then(|rest| rest.split_whitespace().next())
-        .unwrap_or("display");
-    name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect()
+        .map(str::to_string)
+        .unwrap_or_else(|| display_name(description));
+    let name: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    if name.is_empty() { "display".into() } else { name }
 }
 
 impl eframe::App for App {
@@ -3102,7 +3105,8 @@ mod tests {
     #[test]
     fn output_name_from_description() {
         assert_eq!(output_name("Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, width 2560, height 1600"), "eDP-1");
-        assert_eq!(output_name("Something else"), "display");
+        assert_eq!(output_name("Built-in Display, at 0, 0, width 2624, height 1696 (Primary Display)"), "Built-in_Display");
+        assert_eq!(output_name(""), "display");
     }
 }
 
@@ -3174,7 +3178,7 @@ mod page_pictures {
                 harness.run_steps(2);
             }
             if name == "verify-status" {
-                harness.state_mut().status = Some((true, "Profile installed. KWin now uses it on the display.".into()));
+                harness.state_mut().status = Some((true, "Profile installed. KDE now uses it on the display.".into()));
                 harness.run_steps(2);
             }
             if name == "targets-lut" {

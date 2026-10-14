@@ -14,8 +14,9 @@
   is at the bottom of the sidebar. `logic()` drains the
   running tool's events each frame; `ui()` draws the panels.
 - `src/argyll.rs`: finding and running ArgyllCMS.
-- `src/system.rs`: what differs between operating systems in finding and
-  running the bundled ArgyllCMS. A `System` trait with one implementation
+- `src/system.rs`: what differs between operating systems: the bundled
+  ArgyllCMS, where files go, which profile a display uses, and opening
+  files and links. A `System` trait with one implementation
   per OS, chosen with `cfg` (`system::current()`): the bundled variants
   Preferences offers (`Variant`: label and display system, the default
   first), where the bundled ArgyllCMS is (`bundled_dir()`), and why it's
@@ -26,8 +27,29 @@
   installed `DisplayCraft.app` (`/Applications`, then `~/Applications`). Windows (`Single`, not yet packaged):
   one "Bundled ArgyllCMS", from `$DISPLAYCRAFT_ARGYLL_BIN`. Also `open()`,
   for files and links: xdg-open, `open` on macOS, `cmd /C start ""` on
-  Windows. Checked to compile (`cargo check`) for `aarch64-apple-darwin`
-  and `x86_64-pc-windows-gnu`.
+  Windows. `live_output()` (see Running ArgyllCMS). `data_dir()` and
+  `config_dir()`: Linux the XDG base directories plus `displaycraft`
+  (`~/.local/share`, `~/.config`); macOS both `~/Library/Application
+  Support/DisplayCraft`; Windows `AppData/Roaming/DisplayCraft`.
+  `installed_profiles_dir()`: ucmm's `~/.config/color/icc/devices/display`,
+  `~/Library/ColorSync/Profiles` (where ArgyllCMS installs for the user),
+  Windows' spool `color` folder. `correction_dirs()`: ArgyllCMS's and
+  DisplayCAL's data folders on each. `profile_in_use()`: on Linux KWin's
+  answer through `kscreen-doctor -o` (which also says whether it's in ICC
+  mode at all), elsewhere ArgyllCMS's `dispwin -d n -W`
+  (`argyll::installed_profile()`); `color_manager()` ("KDE", "macOS",
+  "Windows") and `without_profile()` word the page and messages. Checked to
+  compile (`cargo check`) for `aarch64-apple-darwin` and
+  `x86_64-pc-windows-gnu`; the kscreen-doctor parsing in `profiles.rs` is
+  Linux-only.
+- Messages DisplayCraft shows say "KDE", never "KWin". ArgyllCMS's session
+  report is reworded as it's read (`argyll::as_shown()`: "KDE Plasma
+  (KWin)" and "KDE Plasma's KWin" become "KDE Plasma", other "KWin" "KDE"),
+  and the session line reads e.g. "KDE on Wayland, with XWayland :0" or
+  "GNOME on X11 (Xorg :0, window manager GNOME Shell)".
+- Files for a display are named after its output (`output_name()`, e.g.
+  "eDP-1"), or where the description has none (macOS) after its name with
+  anything but letters, digits and "-" made "_" ("Built-in_Display").
 - `src/targets.rs`: calibration targets and their dispcal arguments.
 - `src/settings.rs`: preferences (`argyll_bin`, `argyll_variant`, `theme`, `correction`, and
   the last `targets`, saved whenever they change) in
@@ -63,7 +85,7 @@
 - `src/layout.rs`: the arrangement of the displays, from `kscreen-doctor
   -j` or else ArgyllCMS's display list, and `display_name()`.
 - `src/profiles.rs`: reading ICC profiles (description, date, white point),
-  listing them, the last verification verdict, and KWin's state for an
+  listing them, the last verification verdict, and (Linux) KWin's state for an
   output from `kscreen-doctor -o`.
 - `src/session.rs`: when the window can't open at all (no Wayland), prints
   the reason and tries `kdialog`, then `zenity`.
@@ -73,9 +95,14 @@
 
 ## Logo, icon and installing
 
-`assets/displaycraft.png` (1254x1254, opaque dark background) is the source.
-`assets/icons/hicolor/<n>x<n>/apps/displaycraft.png` (16 to 512) are made
-from it with `magick displaycraft.png -resize <n>x<n> -strip`; regenerate
+`assets/displaycraft.png` (1254x1254, RGBA) is the source. Its outer
+background is transparent: the original's dark background (17, 18, 23) was
+cleared where it connects to the image's edge, so the laptop's dark screen
+stays, and the anti-aliased edge pixels were given partial alpha with the
+background unmixed from their colour, so there's no dark fringe on light
+backgrounds. `assets/icons/hicolor/<n>x<n>/apps/displaycraft.png` (16 to
+512) are made from it with `magick displaycraft.png -resize <n>x<n> -strip
+PNG32:<file>` (PNG32 keeps the alpha at small sizes); regenerate
 them when the source changes. The UI embeds the 256 one through
 `egui::include_image!` and `egui_extras`'s image loaders (`app::logo()`,
 drawn with rounded corners): above the step ladder (once per window, so not
@@ -188,8 +215,8 @@ new scan replaces a running one, whose result is dropped.
   `tcgetattr` warnings (stdin isn't a terminal) are printed without line
   breaks, so they're cut out of the middle of lines.
 - `job_controls()` takes where Cancel and the status go. Measurement puts
-  Cancel at the foot of the page during a run (a bottom-up layout with the
-  page above it, `page_run_body()`); Verify shows the status on its own
+  Cancel between the progress and the Log during a run, 1.5 rows from
+  each, so opening the Log doesn't push it out of reach; Verify shows the status on its own
   line between the profile selector and Begin, and while measuring shows the
 progress bar with Cancel under it, 1.5 rows apart; Report keeps both
 inline.

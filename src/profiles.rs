@@ -2,6 +2,7 @@
 //! made, what each is, and which one KWin is using.
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
 /// What a profile file says about itself.
@@ -299,14 +300,6 @@ pub fn read_curves(path: &Path) -> Option<Curves> {
     curves(&std::fs::read(path).ok()?)
 }
 
-/// Where ArgyllCMS installs display profiles for the user
-pub fn installed_dir() -> Option<PathBuf> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(config.join("color/icc/devices/display"))
-}
-
 /// .icc/.icm files in a directory, newest first
 pub fn list(dir: &Path) -> Vec<PathBuf> {
     let mut found: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
@@ -338,6 +331,7 @@ pub fn last_verdict(verify_dir: &Path, profile: &Path) -> Option<String> {
     text.lines().find_map(|l| l.strip_prefix("Verdict: ")).and_then(|v| v.split_whitespace().next()).map(str::to_string)
 }
 
+#[cfg(target_os = "linux")]
 /// How KWin is managing an output's color
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OutputColor {
@@ -346,6 +340,7 @@ pub struct OutputColor {
     pub icc_mode: bool,
 }
 
+#[cfg(target_os = "linux")]
 impl OutputColor {
     /// The profile KWin is actually using
     pub fn active(&self) -> Option<&Path> {
@@ -353,6 +348,7 @@ impl OutputColor {
     }
 }
 
+#[cfg(target_os = "linux")]
 /// Ask KWin, through kscreen-doctor, how `output` (e.g. "eDP-1") is managed.
 /// Its JSON leaves out the profile source, so the text listing is read.
 pub fn output_color(output: &str) -> Option<OutputColor> {
@@ -360,6 +356,7 @@ pub fn output_color(output: &str) -> Option<OutputColor> {
     parse_outputs(&String::from_utf8_lossy(&out.stdout), output)
 }
 
+#[cfg(target_os = "linux")]
 fn parse_outputs(text: &str, output: &str) -> Option<OutputColor> {
     let mut found = None;
     let mut current = false;
@@ -385,6 +382,7 @@ fn parse_outputs(text: &str, output: &str) -> Option<OutputColor> {
     found
 }
 
+#[cfg(target_os = "linux")]
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
@@ -452,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn reads_kscreen_doctor_listing() {
         let text = "Output: 1 eDP-1 59234731-3455\n\tenabled\n\x1b[01;32mICC profile:\x1b[0;0m /home/u/x.icc\n\
                     \tColor profile source: ICC\nOutput: 2 HDMI-A-1 abc\n\tICC profile: none\n\tColor profile source: sRGB\n";

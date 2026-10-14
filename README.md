@@ -55,6 +55,34 @@ ArgyllCMS work around it. If a display is ever left black anyway, running
 `dispwin -d 1 -L` from `DisplayCraft.app/Contents/Resources/argyll/bin`
 (over SSH, for instance) brings it back.
 
+## Instruments
+
+These are the instruments ArgyllCMS supports for measuring displays, and
+so the ones DisplayCraft knows. Their support is ArgyllCMS's, and not all
+of them have been tested with DisplayCraft.
+
+- Calibrite and X-Rite: i1Display Pro, Pro Plus and Studio, ColorMunki
+  Display, ColorChecker Display, Pro and Plus (and other i1Display 3
+  based colorimeters); i1Pro, i1Pro 2 and i1Pro 3 (and EFI ES-1000 and
+  ES-2000); ColorMunki Design, Photo and i1Studio; ColorMunki Create and
+  Smile; DTP92 and DTP94
+- GretagMacbeth: Eye-One Display 1, 2 and LT; Eye-One Monitor; Huey
+  (including the Lenovo W built-in one); Spectrolino; SpectroScan and
+  SpectroScanT
+- Colorimeters treated as an Eye-One Display: HP DreamColor and APS,
+  CalMAN X2, LaCie Blue Eye, Sequel MonacoOPTIX, Chroma 4 and 5
+- Datacolor: Spyder 1, 2, 3, 4 and 5, SpyderX, SpyderX2, and Spyder and
+  SpyderPRO (2024)
+- JETI: specbos 1201, 1211 and 2501; spectraval 1501 and 1511
+- Klein: K-10 (reported to work with the K-1 and K-8 too)
+- Image Engineering: EX1
+- Hughski: ColorHug and ColorHug2
+- Colorimètre HCFR
+
+The Spyder 2 needs its firmware, and the Spyder 4 and 5 their calibration
+data, copied from the vendor's software with ArgyllCMS's `oeminst`, which
+comes with DisplayCraft.
+
 ## Requirements
 
 - One of:

@@ -11,6 +11,9 @@ pub enum White {
     /// A daylight color temperature of the user's choosing
     Custom,
     Native,
+    /// Exact CIE xy chromaticity, from a reference display: a temperature
+    /// alone would lose any tint off the daylight line
+    Chromaticity,
 }
 
 impl White {
@@ -86,11 +89,18 @@ pub struct Targets {
     pub white: White,
     /// For White::Custom
     pub kelvin: f64,
+    /// For White::Chromaticity, CIE x and y. Kept when another white is
+    /// chosen, so it can be chosen again.
+    pub white_xy: Option<[f64; 2]>,
     pub tone: Tone,
     /// For Tone::Gamma
     pub gamma: f64,
     pub set_brightness: bool,
     pub brightness: f64,
+    /// Raise black to `black` cd/m², rather than the device's own. For
+    /// matching print's contrast, which device black far exceeds.
+    pub set_black: bool,
+    pub black: f64,
     pub quality: Quality,
     pub profile: ProfileType,
 }
@@ -100,10 +110,14 @@ impl Default for Targets {
         Targets {
             white: White::D65,
             kelvin: 6500.0,
+            white_xy: None,
             tone: Tone::Gamma22,
             gamma: 2.2,
             set_brightness: false,
             brightness: 120.0,
+            set_black: false,
+            // About a paper's contrast against 120 cd/m² white
+            black: 0.5,
             quality: Quality::Medium,
             profile: ProfileType::ShaperMatrix,
         }
@@ -129,10 +143,29 @@ impl Targets {
     /// The daylight temperature to calibrate to, or None for native white
     pub fn kelvin(&self) -> Option<f64> {
         match self.white {
-            White::Native => None,
+            White::Native | White::Chromaticity => None,
             White::Custom => Some(self.kelvin),
             w => White::PRESETS.iter().find(|p| p.0 == w).map(|p| p.2),
         }
+    }
+
+    /// dispcal's white point arguments: -t for a daylight temperature, -w
+    /// for a chromaticity, none for native
+    pub fn white_args(&self) -> Vec<String> {
+        match (self.white, self.white_xy) {
+            (White::Chromaticity, Some([x, y])) => vec!["-w".into(), format!("{x:.4},{y:.4}")],
+            // Chromaticity without one (hand-edited settings) is native
+            (White::Chromaticity, None) => Vec::new(),
+            _ => self.kelvin().map(|k| vec!["-t".into(), format!("{k:.0}")]).unwrap_or_default(),
+        }
+    }
+
+    /// dispcal's black arguments: -B for a black level, with -k 1 so the
+    /// raised black and the grays near it take white's hue. dispcal's
+    /// automatic -k corrects little on panels with a poor black, which a
+    /// raised black has room to correct fully.
+    pub fn black_args(&self) -> Vec<String> {
+        if self.set_black { vec!["-B".into(), format!("{:.3}", self.black), "-k".into(), "1".into()] } else { Vec::new() }
     }
 
     /// dispcal's -g value
@@ -145,13 +178,16 @@ impl Targets {
         }
     }
 
-    /// e.g. "White D55 (5500 K), gamma 2.2, native brightness, medium quality,
-    /// shaper+matrix profile"
+    /// e.g. "White D55 (5500 K), gamma 2.2, native brightness, device black,
+    /// medium quality, shaper+matrix profile"
     pub fn describe(&self) -> String {
-        let white = match self.white {
-            White::Native => "native white".to_string(),
-            White::Custom => format!("white {:.0} K", self.kelvin),
-            w => White::PRESETS.iter().find(|p| p.0 == w).map(|p| format!("white {} ({:.0} K)", p.1, p.2)).unwrap_or_default(),
+        let white = match (self.white, self.white_xy) {
+            (White::Chromaticity, Some([x, y])) => {
+                format!("white x {x:.4}, y {y:.4} (about {:.0} K)", crate::report::cct((x, y)))
+            }
+            (White::Native | White::Chromaticity, _) => "native white".to_string(),
+            (White::Custom, _) => format!("white {:.0} K", self.kelvin),
+            (w, _) => White::PRESETS.iter().find(|p| p.0 == w).map(|p| format!("white {} ({:.0} K)", p.1, p.2)).unwrap_or_default(),
         };
         let tone = match self.tone {
             Tone::Srgb => "sRGB tone curve".into(),
@@ -159,6 +195,7 @@ impl Targets {
         };
         let brightness =
             if self.set_brightness { format!("{:.0} cd/m²", self.brightness) } else { "native brightness".into() };
+        let black = if self.set_black { format!("black {:.2} cd/m²", self.black) } else { "device black".into() };
         let quality = match self.quality {
             Quality::Low => "low",
             Quality::Medium => "medium",
@@ -168,7 +205,7 @@ impl Targets {
             ProfileType::ShaperMatrix => "shaper+matrix profile",
             ProfileType::Lut => "LUT profile",
         };
-        let mut text = format!("{white}, {tone}, {brightness}, {quality} quality, {profile}");
+        let mut text = format!("{white}, {tone}, {brightness}, {black}, {quality} quality, {profile}");
         text[..1].make_ascii_uppercase();
         text
     }
@@ -183,12 +220,24 @@ mod tests {
         let mut t = Targets { white: White::D55, ..Targets::default() };
         assert_eq!(t.kelvin(), Some(5500.0));
         assert_eq!(t.gamma_arg(), "2.2");
-        assert_eq!(t.describe(), "White D55 (5500 K), gamma 2.2, native brightness, medium quality, shaper+matrix profile");
+        assert_eq!(t.describe(), "White D55 (5500 K), gamma 2.2, native brightness, device black, medium quality, shaper+matrix profile");
+        assert!(t.black_args().is_empty());
+        t.set_black = true;
+        assert_eq!(t.black_args(), ["-B", "0.500", "-k", "1"]);
+        assert!(t.describe().contains(", black 0.50 cd/m², "), "{}", t.describe());
         t.white = White::Native;
         t.tone = Tone::Gamma;
         t.gamma = 2.4;
         assert_eq!(t.kelvin(), None);
         assert_eq!(t.gamma_arg(), "2.40");
+        assert!(t.white_args().is_empty());
+        t.white = White::Chromaticity;
+        assert!(t.white_args().is_empty());
+        t.white_xy = Some([0.3127, 0.329]);
+        assert_eq!(t.white_args(), ["-w", "0.3127,0.3290"]);
+        assert!(t.describe().starts_with("White x 0.3127, y 0.3290 (about 650"), "{}", t.describe());
+        t.white = White::D50;
+        assert_eq!(t.white_args(), ["-t", "5000"]);
     }
 
     #[test]

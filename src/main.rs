@@ -9,6 +9,7 @@ mod charts;
 mod corrections;
 mod layout;
 mod profiles;
+mod reference;
 mod report;
 mod session;
 mod settings;

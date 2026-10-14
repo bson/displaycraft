@@ -13,6 +13,7 @@ use crate::charts;
 use crate::corrections::{self, Correction};
 use crate::layout::{self, display_name};
 use crate::profiles;
+use crate::reference;
 use crate::report;
 use crate::settings::Settings;
 use crate::system;
@@ -154,6 +155,11 @@ struct CalRun {
     naming: Option<String>,
     /// The output it's for, e.g. "eDP-1", recorded as the profile's model
     output: String,
+    /// When the profile's patches were measured, for its reference
+    measured: String,
+    /// The black point it was calibrated to (0 for device black), taken at
+    /// the start: the targets can be changed while the profile is named
+    black_target: f64,
 }
 
 impl CalRun {
@@ -309,6 +315,9 @@ struct ReportOutcome {
     report: report::Report,
     title: String,
     saved: PathBuf,
+    /// Made with the report, so it has the time of the measurement; written
+    /// only if asked for
+    reference: reference::Reference,
 }
 
 /// One profile on the Profiles page. A DisplayCraft profile and its
@@ -417,9 +426,18 @@ pub struct App {
     report_mode: ReportMode,
     report_run: Option<ReportRun>,
     report_outcome: Option<ReportOutcome>,
+    /// Where the last report's reference was saved
+    reference_saved: Option<PathBuf>,
+    /// The reference being matched (`Settings::match_reference`), read from
+    /// `Settings::reference_file`
+    reference: Option<reference::Reference>,
+    /// Why that couldn't be read, at startup (it may have been moved)
+    reference_error: Option<String>,
     profiles_view: Option<ProfilesView>,
     /// A DisplayCraft profile waiting for the user to confirm deleting it
     delete_confirm: Option<PathBuf>,
+    /// Whether deleting it also deletes its reference
+    delete_reference: bool,
     /// The profile whose graphs the Profiles page shows, by file name
     profile_details: Option<String>,
 }
@@ -478,13 +496,23 @@ impl App {
             report_mode: ReportMode::Uncalibrated,
             report_run: None,
             report_outcome: None,
+            reference_saved: None,
+            reference: None,
+            reference_error: None,
             profiles_view: None,
             delete_confirm: None,
+            delete_reference: false,
             profile_details: None,
         };
         app.corrections = corrections::find(app.bin.as_deref());
         app.refresh_inventory();
         app.verify_profile = app.saved_profiles().into_iter().next();
+        if let Some(path) = app.settings.reference_file.clone().filter(|_| app.settings.match_reference) {
+            match reference::Reference::load(&path) {
+                Ok(r) => app.reference = Some(r),
+                Err(e) => app.reference_error = Some(e),
+            }
+        }
         app
     }
 
@@ -604,9 +632,8 @@ impl App {
         // Skip the interactive adjustment, which Settings offers on its own
         args.push("-m".into());
         args.extend(["-q".into(), t.quality.arg().into()]);
-        if let Some(k) = t.kelvin() {
-            args.extend(["-t".into(), format!("{k:.0}")]);
-        }
+        args.extend(t.white_args());
+        args.extend(t.black_args());
         args.extend(["-g".into(), t.gamma_arg()]);
         if t.set_brightness {
             args.extend(["-b".into(), format!("{:.0}", t.brightness)]);
@@ -625,8 +652,9 @@ impl App {
         args.extend(["-o".into(), quick.display().to_string(), base.display().to_string()]);
 
         let output = self.inventory.displays.get(self.display).map(|d| output_name(&d.description)).unwrap_or_default();
+        let black_target = if t.set_black { t.black } else { 0.0 };
         self.start_job(ctx, JobKind::Calibrate, &bin, "dispcal", &args);
-        self.cal_run = Some(CalRun { base, quick, summary: Vec::new(), naming: None, output });
+        self.cal_run = Some(CalRun { base, quick, summary: Vec::new(), naming: None, output, measured: String::new(), black_target });
         self.outcome = None;
     }
 
@@ -662,6 +690,7 @@ impl App {
                 let name = format!("{} {}", self.display_label().map(|n| short_name(&n).to_string()).unwrap_or_default(), chrono::Local::now().format("%Y-%m-%d %H:%M"));
                 if let Some(run) = self.cal_run.as_mut() {
                     run.naming = Some(name.trim().to_string());
+                    run.measured = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
                 }
             }
             _ => {}
@@ -716,6 +745,26 @@ impl App {
         self.start_job(ctx, JobKind::Colprof, &bin, "colprof", &args);
     }
 
+    /// A reference beside the profile `icc`, from the patches measured for
+    /// it, so the display can be brought back to how it looks now
+    fn save_profile_reference(&self, run: &CalRun, icc: &std::path::Path) -> Result<(), String> {
+        let ti3 = std::fs::read_to_string(run.base.with_extension("ti3")).map_err(|e| format!("can't read the measurements: {e}"))?;
+        let patches = reference::read_ti3(&ti3).ok_or("the measurements are incomplete")?;
+        let display = self.display_label().unwrap_or_else(|| run.output.clone());
+        let about = reference::About {
+            model: reference::model(&display),
+            display,
+            measured: run.measured.clone(),
+            mode: "as calibrated".into(),
+            profile: icc.file_stem().map(|s| s.to_string_lossy().into_owned()),
+            instrument: self.instrument_label(),
+            correction: self.correction_label(),
+            black_target: Some(run.black_target),
+        };
+        let r = reference::Reference::from_patches(about, patches)?;
+        r.save(&icc.with_extension("dcref")).map_err(|e| e.to_string())
+    }
+
     /// What's shown above a job's progress: "Step 3: calibrating" for a
     /// profile run, "Measuring…" for a verification
     fn stage_text(&self, kind: JobKind) -> Option<String> {
@@ -728,6 +777,10 @@ impl App {
     /// The chosen display, e.g. "eDP-1 (Sharp Corporation eDP-1)"
     fn display_label(&self) -> Option<String> {
         self.inventory.displays.get(self.display).map(|d| display_name(&d.description))
+    }
+
+    fn instrument_label(&self) -> String {
+        self.inventory.instruments.get(self.instrument).map(|i| i.description.clone()).unwrap_or_default()
     }
 
     /// The correction for the display's backlight: a correction file, a
@@ -968,6 +1021,14 @@ impl App {
                         .collect();
                     if let Some(run) = self.cal_run.as_mut() {
                         run.summary = lines.iter().rev().take(4).rev().cloned().collect();
+                        // Otherwise only a warning in the log, easily missed
+                        if self.log.iter().any(|l| l.contains("Black brigtness") && l.contains("ignored")) {
+                            run.summary.push(
+                                "Black point not set: it was no brighter than the display's own black, or at least \
+                                 half its white. The display's own black was used."
+                                    .into(),
+                            );
+                        }
                     }
                 }
                 if kind != JobKind::Colprof {
@@ -983,9 +1044,13 @@ impl App {
                     return;
                 }
                 let _ = std::fs::remove_file(&run.quick);
+                let reference = self.settings.profile_reference.then(|| self.save_profile_reference(&run, &icc));
                 let mut summary = run.summary;
                 // "Profile check complete, peak err = 2.1, avg err = 0.5"
                 summary.extend(self.log.iter().filter(|l| l.contains("peak err")).last().map(|l| l.trim().to_string()));
+                if let Some(Err(why)) = reference {
+                    summary.push(format!("Reference not saved: {why}"));
+                }
                 self.outcome = Some(Outcome { cal, icc, summary, installed: false });
                 self.status = Some((true, "Calibration and profile done".into()));
             }
@@ -1752,6 +1817,10 @@ impl App {
         ui.add_space(ui.text_style_height(&egui::TextStyle::Body));
         ui.label("Choose what the calibration and profiling should aim for:");
         Self::gap(ui);
+        if let Some(name) = self.reference_file_name().filter(|_| self.reference.is_some()) {
+            Self::context_line(ui, format!("Set to match {name}, chosen on the Measure page."));
+            Self::gap(ui);
+        }
         let tg = &mut self.settings.targets;
         // Fixed while adjusting: dispcal took the targets when it started
         ui.add_enabled_ui(!running, |ui| {
@@ -1763,6 +1832,10 @@ impl App {
                     }
                     ui.radio_value(&mut tg.white, White::Native, "Native")
                         .on_hover_text("The display's own white, with no color temperature correction");
+                    if let Some([x, y]) = tg.white_xy {
+                        ui.radio_value(&mut tg.white, White::Chromaticity, format!("x {x:.4}, y {y:.4}"))
+                            .on_hover_text(format!("A reference display's white, about {:.0} K", report::cct((x, y))));
+                    }
                     with_field(ui, |ui| {
                         ui.radio_value(&mut tg.white, White::Custom, "Custom");
                         ui.add_enabled(tg.white == White::Custom, egui::DragValue::new(&mut tg.kelvin).range(3000.0..=10000.0).speed(10.0).suffix(" K"));
@@ -1788,6 +1861,22 @@ impl App {
                     ui.add_enabled(tg.set_brightness, egui::DragValue::new(&mut tg.brightness).range(40.0..=600.0).speed(1.0).suffix(" cd/m²"));
                     if !tg.set_brightness {
                         ui.label(RichText::new("(native)").color(t.text_dim));
+                    }
+                });
+                ui.end_row();
+
+                ui.label("Black point");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut tg.set_black, "Set to").on_hover_text(
+                        "Raise black to this level, for a contrast range that matches print rather than the display's \
+                         deepest black. The dark grays are made neutral, in the white point's color.",
+                    );
+                    ui.add_enabled(
+                        tg.set_black,
+                        egui::DragValue::new(&mut tg.black).range(BLACK_RANGE.0..=BLACK_RANGE.1).speed(0.01).fixed_decimals(2).suffix(" cd/m²"),
+                    );
+                    if !tg.set_black {
+                        ui.label(RichText::new("(device black)").color(t.text_dim));
                     }
                 });
                 ui.end_row();
@@ -1860,9 +1949,8 @@ impl App {
         let t = &self.settings.targets;
         let mut args: Vec<String> = vec!["-v".into(), "-d".into(), display.value.clone()];
         args.extend(self.instrument_args());
-        if let Some(k) = t.kelvin() {
-            args.extend(["-t".into(), format!("{k:.0}")]);
-        }
+        args.extend(t.white_args());
+        args.extend(t.black_args());
         if t.set_brightness {
             args.extend(["-b".into(), format!("{:.0}", t.brightness)]);
         }
@@ -1885,8 +1973,16 @@ impl App {
         Self::context_line(ui, "Note: dark patches may need long integration times for accuracy.".into());
         Self::gap(ui);
         let running = self.job.is_some();
-        if self.cal_run.as_ref().is_some_and(|r| r.naming.is_some()) {
+        let naming = self.cal_run.as_ref().is_some_and(|r| r.naming.is_some());
+        // Fixed once measuring starts: the targets have been given to dispcal
+        ui.add_enabled_ui(!running && !naming, |ui| self.reference_panel(ui));
+        Self::gap(ui);
+        if naming {
             self.naming_panel(ui);
+        } else if self.settings.match_reference && self.reference.is_none() && !running {
+            ui.label(RichText::new("Choose a reference to match, or turn off Match a reference.").color(t.caution));
+            Self::gap(ui);
+            ui.add_enabled(false, egui::Button::new(RichText::new("Begin").font(t.semibold(13.0))));
         } else if self.job_controls(ui, JobKind::Calibrate, false, true) {
             let ctx = ui.ctx().clone();
             self.start_calibration(&ctx);
@@ -1936,6 +2032,18 @@ impl App {
             let edit = ui.add(egui::TextEdit::singleline(&mut edited).desired_width(360.0));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && Self::name_problem(&edited).is_none() {
                 save = true;
+            }
+            ui.add_space(8.0);
+            if ui
+                .checkbox(&mut self.settings.profile_reference, "Save a reference")
+                .on_hover_text(
+                    "Also save what the display shows with this profile: its white point, brightness, black and 50% \
+                     gray. Matching it later brings a display that has drifted back to how it looks now, and it can \
+                     be used to make other displays look the same.",
+                )
+                .changed()
+            {
+                self.save_settings();
             }
         });
         ui.add_space(4.0);
@@ -1996,6 +2104,7 @@ impl App {
         self.start_job(ctx, JobKind::Report, &bin, "dispread", &args);
         self.report_run = Some(ReportRun { base, mode: self.report_mode, output });
         self.report_outcome = None;
+        self.reference_saved = None;
     }
 
     fn finish_report(&mut self, run: ReportRun) -> Result<ReportOutcome, String> {
@@ -2005,7 +2114,20 @@ impl App {
         let title = format!("{}, {}", run.output, run.mode.title());
         let saved = run.base.with_extension("txt");
         std::fs::write(&saved, report::text(&r, &title)).map_err(|e| format!("Can't write the report: {e}"))?;
-        Ok(ReportOutcome { report: r, title, saved })
+        let display = self.display_label().unwrap_or_else(|| run.output.clone());
+        let about = reference::About {
+            model: reference::model(&display),
+            display,
+            measured: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+            mode: run.mode.title().into(),
+            profile: None,
+            instrument: self.instrument_label(),
+            correction: self.correction_label(),
+            black_target: (run.mode == ReportMode::Current).then(|| self.calibration_black_target()).flatten(),
+        };
+        let patches = report::PATCHES.iter().zip(&measured).map(|(&rgb, &xyz)| reference::Patch { rgb, xyz }).collect();
+        let reference = reference::Reference::from_patches(about, patches)?;
+        Ok(ReportOutcome { report: r, title, saved, reference })
     }
 
     fn page_report(&mut self, ui: &mut egui::Ui) {
@@ -2030,6 +2152,7 @@ impl App {
             self.start_report(&ctx);
         }
 
+        let mut save_reference = None;
         if let Some(o) = &self.report_outcome {
             let r = &o.report;
             Self::gap(ui);
@@ -2052,6 +2175,9 @@ impl App {
                     ui.label("Gamma");
                     value(ui, format!("{:.2}", r.gamma));
                     ui.end_row();
+                    ui.label("50% gray");
+                    value(ui, format!("{:.2} cd/m²  ({:.1}% of white)", r.gray50, 100.0 * r.gray50 / r.white));
+                    ui.end_row();
                     ui.label("White point");
                     value(ui, format!("x {:.4}, y {:.4}  (about {:.0} K)", r.white_xy.0, r.white_xy.1, r.cct));
                     ui.end_row();
@@ -2073,11 +2199,179 @@ impl App {
                         system::current().open(o.saved.as_os_str());
                     }
                 });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Save as reference…")
+                        .on_hover_text(
+                            "Save what this display showed, so other displays, here or on other computers, can be \
+                             calibrated to match it: its white point, brightness and 50% gray. Measure it as calibrated \
+                             now to match it as it is in use.",
+                        )
+                        .clicked()
+                    {
+                        save_reference = Some(o.reference.clone());
+                    }
+                    if let Some(p) = &self.reference_saved {
+                        ui.label(RichText::new(format!("Saved: {}", p.display())).small().color(t.text_dim));
+                    }
+                });
             });
+        }
+
+        if let Some(r) = save_reference {
+            self.save_reference(&r);
         }
 
         Self::gap(ui);
         egui::CollapsingHeader::new("Log").default_open(false).show(ui, |ui| self.log_view(ui, 180.0));
+    }
+
+    fn save_reference(&mut self, r: &reference::Reference) {
+        let output = self.inventory.displays.get(self.display).map(|d| output_name(&d.description)).unwrap_or_default();
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save display reference")
+            .add_filter("DisplayCraft reference", &["dcref"])
+            .set_file_name(format!("{output}-{}.dcref", chrono::Local::now().format("%Y%m%d")));
+        if let Ok(dir) = Self::data_dir().map(|d| d.join("reports")) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(mut path) = dialog.save_file() else { return };
+        // Some portals return the name as typed, without the filter's extension
+        if path.extension().is_none() {
+            path.set_extension("dcref");
+        }
+        match r.save(&path) {
+            Ok(()) => self.reference_saved = Some(path),
+            Err(e) => self.status = Some((false, format!("Can't save the reference: {e}"))),
+        }
+    }
+
+    /// The black level the display's current calibration aimed for (0 for
+    /// device black), where it's one of DisplayCraft's: the .cal beside its
+    /// own copy of the profile in use says. Installed copies share its name.
+    fn calibration_black_target(&self) -> Option<f64> {
+        let bin = self.bin.as_ref()?;
+        let display = self.inventory.displays.get(self.display)?;
+        let output = output_name(&display.description);
+        let profile = system::current().profile_in_use(bin, &display.value, &output)??;
+        let cal = Self::data_dir().ok()?.join(profile.file_name()?).with_extension("cal");
+        std::fs::read_to_string(cal).ok().map(|text| reference::cal_black_target(&text))
+    }
+
+    /// Match a reference: the checkbox, Browse, and what the reference is
+    fn reference_panel(&mut self, ui: &mut egui::Ui) {
+        let t = Tokens::get(ui.ctx());
+        let mut browse = false;
+        ui.horizontal(|ui| {
+            let toggled = ui
+                .checkbox(&mut self.settings.match_reference, "Match a reference")
+                .on_hover_text(
+                    "Calibrate to look like a display reference, saved with a profile or from a display's report: its \
+                     white point, brightness, black and 50% gray. Matching this display's own earlier profile brings \
+                     it back to how it looked then.",
+                )
+                .changed();
+            if toggled {
+                self.reference_error = None;
+                if self.settings.match_reference {
+                    // The file chosen before, if it's still there
+                    if let Some(path) = self.settings.reference_file.clone() {
+                        match reference::Reference::load(&path) {
+                            Ok(r) => self.use_reference(r),
+                            Err(e) => self.reference_error = Some(e),
+                        }
+                    }
+                } else {
+                    self.unmatch_reference();
+                }
+                self.save_settings();
+            }
+            browse = ui.add_enabled(self.settings.match_reference, egui::Button::new("Browse…")).clicked();
+            if let Some(name) = self.reference_file_name() {
+                ui.label(RichText::new(name).color(t.text_dim));
+            }
+        });
+        if self.settings.match_reference {
+            if let Some(r) = &self.reference {
+                ui.label(RichText::new(reference_blurb(r)).small().color(t.text_dim));
+            } else if let Some(e) = &self.reference_error {
+                ui.label(RichText::new(e).small().color(t.caution));
+            }
+        }
+        if browse {
+            self.browse_reference();
+        }
+    }
+
+    /// The reference file's name, while matching one
+    fn reference_file_name(&self) -> Option<String> {
+        let path = self.settings.reference_file.as_ref().filter(|_| self.settings.match_reference)?;
+        Some(path.file_name()?.to_string_lossy().into_owned())
+    }
+
+    fn browse_reference(&mut self) {
+        let mut dialog =
+            rfd::FileDialog::new().set_title("Display reference to match").add_filter("DisplayCraft reference", &["dcref"]);
+        // Where the profiles' references are
+        if let Ok(dir) = Self::data_dir() {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(path) = dialog.pick_file() else { return };
+        match reference::Reference::load(&path) {
+            Ok(r) => {
+                self.settings.reference_file = Some(path);
+                self.reference_error = None;
+                self.use_reference(r);
+            }
+            // The one matched before, if any, stays
+            Err(e) => self.status = Some((false, e)),
+        }
+        self.save_settings();
+    }
+
+    /// Put back the targets from before matching. Quality and profile type
+    /// weren't matched, so they stay as they are now.
+    fn unmatch_reference(&mut self) {
+        if let Some(before) = self.settings.unmatched_targets.take() {
+            let tg = &mut self.settings.targets;
+            tg.white = before.white;
+            tg.tone = before.tone;
+            tg.gamma = before.gamma;
+            tg.set_brightness = before.set_brightness;
+            tg.brightness = before.brightness;
+            tg.set_black = before.set_black;
+            tg.black = before.black;
+        }
+        self.reference = None;
+    }
+
+    /// Calibrate to look like a reference display: its white point, its
+    /// white brightness, its black point, and the gamma that puts 50% gray
+    /// where it was
+    fn use_reference(&mut self, r: reference::Reference) {
+        // Only the first time: choosing another reference while matching
+        // keeps the targets from before any of them
+        if self.settings.unmatched_targets.is_none() {
+            self.settings.unmatched_targets = Some(self.settings.targets.clone());
+        }
+        let tg = &mut self.settings.targets;
+        tg.white = White::Chromaticity;
+        tg.white_xy = Some([r.white_x, r.white_y]);
+        tg.tone = Tone::Gamma;
+        tg.gamma = r.gamma50.clamp(1.0, 3.0);
+        tg.set_brightness = true;
+        // dispcal is given whole cd/m²
+        tg.brightness = r.white.round().clamp(40.0, 600.0);
+        match r.black_target {
+            Some(b) if b > 0.0 => {
+                tg.set_black = true;
+                tg.black = b.clamp(BLACK_RANGE.0, BLACK_RANGE.1);
+            }
+            Some(_) => tg.set_black = false,
+            None => {}
+        }
+        self.reference = Some(r);
     }
 
     /// Read the profiles and KWin's state for the Profiles page
@@ -2303,6 +2597,7 @@ impl App {
 
         if let Some(p) = delete {
             self.delete_confirm = Some(p);
+            self.delete_reference = false;
         }
         if let Some(d) = details {
             self.profile_details = d;
@@ -2323,6 +2618,7 @@ impl App {
     /// Confirm deleting one of DisplayCraft's profiles, with its calibration
     fn delete_dialog(&mut self, ctx: &egui::Context) {
         let Some(path) = self.delete_confirm.clone() else { return };
+        let reference = path.with_extension("dcref");
         let t = Tokens::get(ctx);
         let mut answer = None;
         egui::Modal::new(egui::Id::new("delete-profile")).show(ctx, |ui| {
@@ -2331,6 +2627,13 @@ impl App {
             ui.add_space(6.0);
             ui.label(path.display().to_string());
             ui.label(RichText::new("Its calibration file goes too. Installed copies aren't affected.").color(t.text_dim));
+            // Off by default: the reference is what brings the display back
+            // to this profile's look, which may be wanted after the profile
+            if reference.is_file() {
+                ui.add_space(6.0);
+                ui.checkbox(&mut self.delete_reference, "Also delete its reference")
+                    .on_hover_text("Kept, it can still be matched to bring a display back to how it looked with this profile.");
+            }
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui.button("Delete").clicked() {
@@ -2344,6 +2647,9 @@ impl App {
         match answer {
             Some(true) => {
                 let _ = std::fs::remove_file(path.with_extension("cal"));
+                if self.delete_reference {
+                    let _ = std::fs::remove_file(&reference);
+                }
                 self.status = match std::fs::remove_file(&path) {
                     Ok(()) => None,
                     Err(e) => Some((false, format!("Can't delete {}: {e}", path.display()))),
@@ -2915,6 +3221,10 @@ fn with_field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+/// The black point field's range, cd/m². dispcal also ignores a level at or
+/// below the display's own black, or at least half its white.
+const BLACK_RANGE: (f64, f64) = (0.05, 20.0);
+
 /// How long Measure stays disabled after a measuring job starts, so the
 /// placement message is up long enough to read
 const PLACING_TIME: std::time::Duration = std::time::Duration::from_secs(5);
@@ -2981,6 +3291,19 @@ fn prompt_message(prompt: &str, before: &[String]) -> String {
 
 /// "/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)" ->
 /// "i1Display Pro or ColorMunki Display"
+/// When, on what and with what a reference was measured: "Measured
+/// 2026-10-14 15:30 on ASUSTek COMPUTER INC PA279CRV (DP-3), with i1
+/// DisplayPro, ColorMunki Display, corrected for LCD White LED"
+fn reference_blurb(r: &reference::Reference) -> String {
+    let monitor = match &r.model {
+        Some(m) => format!("{m} ({})", short_name(&r.display)),
+        None => r.display.clone(),
+    };
+    let correction = r.correction.as_ref().map(|c| format!(", corrected for {c}")).unwrap_or_default();
+    let profile = r.profile.as_ref().map(|p| format!(", for profile \"{p}\"")).unwrap_or_default();
+    format!("Measured {} on {monitor}, with {}{correction}{profile}", r.measured, instrument_name(&r.instrument))
+}
+
 fn instrument_name(description: &str) -> &str {
     let name = description.split_once(" (").and_then(|(_, rest)| rest.strip_suffix(')')).unwrap_or(description);
     // The one instrument Argyll lists under both names it's sold as. A
@@ -3314,7 +3637,7 @@ mod hardware_adjust_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{display_name, instrument_name, output_name, prompt_message};
+    use super::{display_name, instrument_name, output_name, prompt_message, reference, reference_blurb, report};
 
     #[test]
     fn profile_names() {
@@ -3350,6 +3673,26 @@ mod tests {
         let cal = ["Calibration failed with 'Misread' (...)".to_string()];
         assert!(prompt_message("Hit any key to retry, or Esc or Q to abort:", &cal).starts_with("Unable to measure"));
         assert_eq!(prompt_message("Something else happened, hit Esc or Q to abort: ", &none), "Something else happened");
+    }
+
+    #[test]
+    fn reference_blurb_says_when_on_what_and_with_what() {
+        let about = reference::About {
+            display: "DP-3 (ASUSTek COMPUTER INC PA279CRV)".into(),
+            model: Some("ASUSTek COMPUTER INC PA279CRV".into()),
+            measured: "2026-10-14 15:30".into(),
+            mode: "as calibrated".into(),
+            profile: None,
+            instrument: "/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)".into(),
+            correction: None,
+            black_target: None,
+        };
+        let patches = report::PATCHES.iter().map(|&rgb| reference::Patch { rgb, xyz: [rgb[0] + 0.1, rgb[0] + 0.1, rgb[0] + 0.1] }).collect();
+        let r = reference::Reference::from_patches(about, patches).unwrap();
+        assert_eq!(
+            reference_blurb(&r),
+            "Measured 2026-10-14 15:30 on ASUSTek COMPUTER INC PA279CRV (DP-3), with i1Display Pro or ColorMunki Display"
+        );
     }
 
     #[test]
@@ -3410,8 +3753,21 @@ mod page_pictures {
                     [0.12 + 230.0 * (0.43 * r + 0.34 * g + 0.18 * b), 0.13 + 242.0 * (0.22 * r + 0.70 * g + 0.08 * b), 0.14 + 260.0 * (0.02 * r + 0.11 * g + 0.95 * b)]
                 })
                 .collect();
+            let r = report::analyze(&m).unwrap();
+            let about = reference::About {
+                display: "eDP-1".into(),
+                model: None,
+                measured: "2026-10-14 15:30".into(),
+                mode: "uncalibrated".into(),
+                profile: None,
+                instrument: "i1 DisplayPro, ColorMunki Display".into(),
+                correction: None,
+                black_target: None,
+            };
+            let patches = report::PATCHES.iter().zip(&m).map(|(&rgb, &xyz)| reference::Patch { rgb, xyz }).collect();
             app.report_outcome = Some(ReportOutcome {
-                report: report::analyze(&m).unwrap(),
+                reference: reference::Reference::from_patches(about, patches).unwrap(),
+                report: r,
                 title: "eDP-1, uncalibrated".into(),
                 saved: "/x/eDP-1-report.txt".into(),
             });
@@ -3422,6 +3778,41 @@ mod page_pictures {
                 // waiting for the instrument to be placed
                 let args = vec!["30".to_string()];
                 harness.state_mut().start_job(&ctx, JobKind::Calibrate, std::path::Path::new("/usr/bin"), "sleep", &args);
+                harness.run_steps(2);
+            }
+            if matches!(name, "run-reference" | "run-reference-none" | "targets-reference") {
+                let app = harness.state_mut();
+                app.settings.match_reference = true;
+                if name != "run-reference-none" {
+                    let about = reference::About {
+                        display: "DP-3 (ASUSTek COMPUTER INC PA279CRV)".into(),
+                        model: Some("ASUSTek COMPUTER INC PA279CRV".into()),
+                        measured: "2026-10-14 15:30".into(),
+                        mode: "as calibrated".into(),
+                        profile: Some("DP-3 2026-10-14 15:30".into()),
+                        instrument: "/dev/bus/usb/001/017 (X-Rite i1 DisplayPro, ColorMunki Display)".into(),
+                        correction: Some("LCD White LED (WLED)".into()),
+                        black_target: Some(0.5),
+                    };
+                    let patches = report::PATCHES.iter().zip(&m).map(|(&rgb, &xyz)| reference::Patch { rgb, xyz }).collect();
+                    let r = reference::Reference::from_patches(about, patches).unwrap();
+                    app.settings.reference_file = Some("/x/DP-3 2026-10-14 15-30.dcref".into());
+                    app.use_reference(r);
+                }
+                harness.run_steps(2);
+            }
+            if name == "run-naming" {
+                // Measured, waiting for a name. Nothing is written: the
+                // base is never renamed or discarded here.
+                harness.state_mut().cal_run = Some(CalRun {
+                    base: "/x/eDP-1-20261014-153000".into(),
+                    quick: "/x/quick.icc".into(),
+                    summary: Vec::new(),
+                    naming: Some("eDP-1 2026-10-14 15:30".into()),
+                    output: "eDP-1".into(),
+                    measured: "2026-10-14 15:30".into(),
+                    black_target: 0.0,
+                });
                 harness.run_steps(2);
             }
             if name == "verify-running" {
@@ -3524,6 +3915,10 @@ mod page_pictures {
         shoot(Step::Targets, 640.0, false, "targets-lut");
         shoot(Step::Run, 640.0, false, "run");
         shoot(Step::Run, 640.0, false, "run-running");
+        shoot(Step::Run, 640.0, false, "run-naming");
+        shoot(Step::Run, 640.0, false, "run-reference");
+        shoot(Step::Run, 640.0, false, "run-reference-none");
+        shoot(Step::Targets, 640.0, false, "targets-reference");
         shoot(Step::Preferences, 640.0, false, "preferences");
         shoot(Step::About, 640.0, false, "about");
         shoot(Step::Verify, 640.0, false, "verify-status");

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::argyll::WindowSystem;
 use crate::targets::Targets;
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Directory holding an ArgyllCMS other than the bundled one. None
@@ -24,6 +24,30 @@ pub struct Settings {
     pub correction: Option<PathBuf>,
     /// The last calibration targets chosen
     pub targets: Targets,
+    /// Save a display reference (.dcref) beside each profile made
+    pub profile_reference: bool,
+    /// Calibrate to match `reference_file`, whose values are in `targets`
+    pub match_reference: bool,
+    pub reference_file: Option<PathBuf>,
+    /// The targets from before matching, put back when matching is turned
+    /// off
+    pub unmatched_targets: Option<Targets>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            argyll_bin: None,
+            argyll_variant: None,
+            theme: None,
+            correction: None,
+            targets: Targets::default(),
+            profile_reference: true,
+            match_reference: false,
+            reference_file: None,
+            unmatched_targets: None,
+        }
+    }
 }
 
 fn path() -> Option<PathBuf> {
@@ -69,6 +93,10 @@ mod tests {
             theme: Some("Paper".into()),
             correction: Some("/usr/local/share/ArgyllCMS/WLEDFamily_07Feb11.ccss".into()),
             targets: Targets { white: crate::targets::White::D55, ..Targets::default() },
+            profile_reference: false,
+            match_reference: true,
+            reference_file: Some("/home/u/.local/share/displaycraft/DP-3 2026-10-14.dcref".into()),
+            unmatched_targets: Some(Targets::default()),
         };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
@@ -76,5 +104,6 @@ mod tests {
         let older: Settings = toml::from_str("theme = \"Midnight\"\nsomething_new = 3\n").unwrap();
         assert_eq!(older.theme.as_deref(), Some("Midnight"));
         assert_eq!(older.argyll_bin, None);
+        assert!(older.profile_reference);
     }
 }

@@ -33,6 +33,7 @@ pub const PATCHES: [[f64; 3]; 16] = [
 const BLACKS: [usize; 3] = [0, 14, 15];
 const WHITE: usize = 1;
 const GRAYS: std::ops::Range<usize> = 2..11;
+const GRAY50: usize = 6;
 const PRIMARIES: std::ops::Range<usize> = 11..14;
 
 /// Reference gamuts: name and red, green, blue primaries in CIE xy
@@ -191,6 +192,8 @@ pub struct Report {
     pub contrast: f64,
     /// Least-squares power law over the gray ramp, black removed
     pub gamma: f64,
+    /// 50% gray: with white, what sets how bright a display looks
+    pub gray50: f64,
     pub white_xy: (f64, f64),
     pub cct: f64,
     /// Red, green and blue in CIE xy
@@ -237,6 +240,7 @@ pub fn analyze(m: &[[f64; 3]]) -> Option<Report> {
         white,
         contrast: if black > 0.0 { white / black } else { f64::INFINITY },
         gamma: if sxx > 0.0 { sxy / sxx } else { f64::NAN },
+        gray50: m[GRAY50][1],
         white_xy,
         cct: cct(white_xy),
         primaries: [primaries[0], primaries[1], primaries[2]],
@@ -253,6 +257,7 @@ pub fn text(r: &Report, title: &str) -> String {
     let _ = writeln!(s, "Black luminance   {:.3} cd/m²", r.black);
     let _ = writeln!(s, "Contrast ratio    {:.0}:1", r.contrast);
     let _ = writeln!(s, "Gamma             {:.2}", r.gamma);
+    let _ = writeln!(s, "50% gray          {:.2} cd/m² ({:.1}% of white)", r.gray50, 100.0 * r.gray50 / r.white);
     let _ = writeln!(s, "White point       x {:.4}, y {:.4} (about {:.0} K)", r.white_xy.0, r.white_xy.1, r.cct);
     for (name, p) in ["Red", "Green", "Blue"].iter().zip(r.primaries) {
         let _ = writeln!(s, "{name:<17} x {:.4}, y {:.4}", p.0, p.1);
@@ -292,6 +297,7 @@ mod tests {
         let r = analyze(&m).unwrap();
         assert!((r.gamma - 2.2).abs() < 0.02, "{}", r.gamma);
         assert!((r.contrast - 1000.0).abs() < 1.0);
+        assert!((r.gray50 - (199.8 * 0.5f64.powf(2.2) + 0.2)).abs() < 1e-9, "{}", r.gray50);
         assert!((r.cct - 6504.0).abs() < 30.0, "{}", r.cct);
         let srgb = &r.coverage[0];
         assert!((srgb.covered - 100.0).abs() < 0.01 && (srgb.relative - 100.0).abs() < 0.01);

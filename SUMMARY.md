@@ -43,6 +43,10 @@
   compile (`cargo check`) for `aarch64-apple-darwin` and
   `x86_64-pc-windows-gnu`; the kscreen-doctor parsing in `profiles.rs` is
   Linux-only.
+- The progress bar (`progress_bar()`) shows Argyll's "patch N of M" as a
+  percentage, centred in the bar (painted over it, as egui puts a bar's
+  own text at its left end). The patch numbers themselves aren't shown: a
+  patch can take several readings, so they don't follow what's on screen.
 - The Log (`log_view()`) is one multi-line label, so a selection copies
   with its line breaks (egui joins a selection across labels without
   them), with a Copy log button above it for all of it, since a selection
@@ -56,9 +60,10 @@
   `Job::send_key()` adds a line end there, as ArgyllCMS reads a piped
   stdin a line at a time on Windows. Cancel ends the program outright
   (no signals), so ArgyllCMS doesn't undo display changes as it does on
-  SIGTERM elsewhere. Built so far in a WinBoat VM: Rust's
-  `x86_64-pc-windows-gnu` toolchain and WinLibs' MinGW-w64, from scratch
-  scripts; packaging and a GitHub job are still to come.
+  SIGTERM elsewhere. Windows' folders are joined a component at a time
+  (`roaming()`, `windows_folder()` for `SystemRoot` and `ProgramData`),
+  so paths don't mix separators, and the log shows commands without the
+  shell prompt's "$" there.
 - Messages DisplayCraft shows say "KDE", never "KWin". ArgyllCMS's session
   report is reworded as it's read (`argyll::as_shown()`: "KDE Plasma
   (KWin)" and "KDE Plasma's KWin" become "KDE Plasma", other "KWin" "KDE"),
@@ -506,9 +511,42 @@ asks. It goes in a disk image, `DisplayCraft-<version>-macos-<arch>.dmg`
 (`hdiutil`, UDZO, with an Applications link to drag it to), which keeps
 its signature and file modes as one file.
 
-`.github/workflows/build.yml`: an `appimage` and a `macos` job each build
-and upload their file as an artifact (two weeks); "Run workflow" on the
-Actions tab stops there. On a `v*` tag, a `release` job that needs both
+`packaging/windows/make-app.ps1` builds on Windows itself (a GitHub
+windows-2025 runner, or a machine with rustup; developed in a WinBoat VM).
+Its options are PowerShell parameters with defaults (`-Src`,
+`-ArgyllSrc`, `-Cache`, `-Out`, `-Work`, `-RustHome`, `-ReleaseTag`), and
+every tool runs through `Invoke-Tool`, a `ProcessStartInfo` whose
+environment is cleared and refilled from Windows' own folder lookups
+(`[Environment]::GetFolderPath`), the cache's temp folder, and what each
+tool needs (Path, `MINGW`, `CARGO_HOME`, `RUSTUP_HOME`,
+`GIT_CONFIG_GLOBAL`), so nothing comes from the calling shell. Into the
+cache, checked by SHA-256: WinLibs' MinGW-w64 (GCC 16.2, UCRT) and
+ArgyllCMS's jam (`ajam-2.5.2-1.3.4.zip`, built `gcc -DNT -fpermissive`),
+and Inno Setup 7.1.0, installed for the current user (`/CURRENTUSER`).
+Rust's `stable-x86_64-pc-windows-gnu` toolchain comes from the rustup in
+`-RustHome` (or one installed in the cache). The sources are copied with
+robocopy, leaving out `.git` and, for DisplayCraft only, `target`, `tmp`,
+`dist` and the submodule (ArgyllCMS has a `target` source folder);
+ArgyllCMS builds with the usual `-sBUILTIN_*` options, `MINGW` and a
+relative `DESTDIR`; DisplayCraft with `cargo +stable-x86_64-pc-windows-gnu
+build --release --locked`. The folder has `displaycraft.exe`,
+`displaycraft.ico`, the eleven ArgyllCMS programs in `argyll\bin`
+(`Single::bundled_dir()`), `argyll\ref`, and licences and `ARGYLLCMS.txt`
+with the commit in `doc`. The script fails if any program imports a DLL
+that isn't in System32 (objdump -p). Out of it come
+`DisplayCraft-<version>-windows-x64.zip` and, from
+`packaging/windows/DisplayCraft.iss`, the installer
+`DisplayCraft-<version>-windows-x64-setup.exe`: per-user by default
+(`PrivilegesRequired=lowest`, `{autopf}`, so `%LOCALAPPDATA%\Programs`;
+an administrator can choose all users), a Start menu entry, an
+uninstaller, and a fixed `AppId` so new versions replace old ones.
+`assets/displaycraft.ico` (16 to 256 px) was made from the hicolor PNGs
+with ImageMagick.
+
+`.github/workflows/build.yml`: `appimage`, `macos` and `windows` jobs each
+build and upload their files as artifacts (two weeks; one upload step
+per file, as unzipped uploads take one each); "Run workflow" on the
+Actions tab stops there. On a `v*` tag, a `release` job that needs all of them
 downloads them and publishes a GitHub release with all of them
 (`gh release create`, with generated notes), so a release only appears
 when every platform built. Each job caches its build output keyed on

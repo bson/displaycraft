@@ -860,7 +860,9 @@ impl App {
         if !matches!(kind, JobKind::Targen | JobKind::ProfileRead | JobKind::Colprof) {
             self.log.clear();
         }
-        self.log.push(format!("$ {tool} {}", args.join(" ")));
+        // A shell prompt's "$" where there is one; Windows' isn't
+        let prompt = if cfg!(windows) { "" } else { "$ " };
+        self.log.push(format!("{prompt}{tool} {}", args.join(" ")));
         self.progress = None;
         self.prompt = None;
         self.adjust = adjust::State::default();
@@ -2465,15 +2467,21 @@ impl App {
         start
     }
 
+    /// How far the tool has got, as a percentage centred in the bar. Not
+    /// Argyll's patch numbers: a patch can take several readings, so they
+    /// don't follow what's on screen.
     fn progress_bar(&self, ui: &mut egui::Ui) {
-        match self.progress {
+        let t = Tokens::get(ui.ctx());
+        let (bar, text) = match self.progress {
             Some((n, m)) if m > 0 => {
-                ui.add(egui::ProgressBar::new(n as f32 / m as f32).text(format!("Patch {n} of {m}")));
+                let done = n as f32 / m as f32;
+                (egui::ProgressBar::new(done), format!("{:.0}%", done * 100.0))
             }
-            _ => {
-                ui.add(egui::ProgressBar::new(0.0).animate(true).text("Working"));
-            }
-        }
+            _ => (egui::ProgressBar::new(0.0).animate(true), "Working".to_string()),
+        };
+        // egui puts a bar's own text at its left end
+        let rect = ui.add(bar).rect;
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(12.0), t.text);
     }
 
     fn log_view(&self, ui: &mut egui::Ui, max_height: f32) {

@@ -138,6 +138,22 @@ mod windows_job {
     }
 }
 
+// Windows' paths are joined a component at a time: a "/" inside one
+// stays as it is, and the path comes out with both separators
+
+/// The user's roaming application data folder (AppData\Roaming)
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn roaming() -> Option<PathBuf> {
+    home().map(|h| h.join("AppData").join("Roaming"))
+}
+
+/// One of Windows' own folders, as Windows names it to every program (not
+/// a user setting), with its usual place if it doesn't
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn windows_folder(var: &str, usual: &str) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| PathBuf::from(usual))
+}
+
 fn home() -> Option<PathBuf> {
     std::env::home_dir()
 }
@@ -320,7 +336,7 @@ impl System for Single {
     }
 
     fn data_dir(&self) -> Option<PathBuf> {
-        home().map(|h| h.join("AppData/Roaming/DisplayCraft"))
+        roaming().map(|r| r.join("DisplayCraft"))
     }
 
     fn config_dir(&self) -> Option<PathBuf> {
@@ -328,16 +344,16 @@ impl System for Single {
     }
 
     fn installed_profiles_dir(&self) -> Option<PathBuf> {
-        Some("C:/Windows/System32/spool/drivers/color".into())
+        Some(windows_folder("SystemRoot", r"C:\Windows").join("System32").join("spool").join("drivers").join("color"))
     }
 
     fn correction_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
-        if let Some(h) = home() {
-            dirs.push(h.join("AppData/Roaming/ArgyllCMS"));
-            dirs.push(h.join("AppData/Roaming/DisplayCAL/dl"));
+        if let Some(r) = roaming() {
+            dirs.push(r.join("ArgyllCMS"));
+            dirs.push(r.join("DisplayCAL").join("dl"));
         }
-        dirs.push("C:/ProgramData/ArgyllCMS".into());
+        dirs.push(windows_folder("ProgramData", r"C:\ProgramData").join("ArgyllCMS"));
         dirs
     }
 

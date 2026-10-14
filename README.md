@@ -88,13 +88,24 @@ work there yet. Run from source (`cargo run --release`), it uses the
 ArgyllCMS inside an installed `DisplayCraft.app`, in `/Applications` or
 `~/Applications`.
 
+## Windows
+
+`packaging\windows\make-app.ps1` builds DisplayCraft with the same
+ArgyllCMS on a Windows machine with rustup, downloading the rest (a
+MinGW-w64 compiler, ArgyllCMS's jam and Inno Setup) into its cache. It
+makes a portable zip and an installer, which installs for the current
+user without administrator rights, with a Start menu entry and an
+uninstaller. Neither is signed, so Windows SmartScreen warns before the
+first run. On Windows DisplayCraft runs and measures, but hasn't been
+tried on real hardware yet.
+
 ## Releases
 
-On GitHub, the Build workflow makes test builds of the AppImage and the
-macOS app when run from the Actions tab, and publishes a release with both
-when a version tag (`v0.1.0`, matching `Cargo.toml`) is pushed. Both are
-downloaded as they are, not zipped. A downloaded AppImage needs
-`chmod +x` before it runs.
+On GitHub, the Build workflow makes test builds of the AppImage, the macOS
+app and the Windows zip and installer when run from the Actions tab, and
+publishes a release with all of them when a version tag (`v0.1.0`,
+matching `Cargo.toml`) is pushed. Each downloads as it is, without being
+zipped again. A downloaded AppImage needs `chmod +x` before it runs.
 
 ## License
 

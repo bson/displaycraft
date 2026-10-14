@@ -2560,6 +2560,11 @@ impl App {
             if self.placing || self.prompt.is_some() {
                 self.job_controls(ui, JobKind::Verify, false, false);
             } else {
+                // As job_controls() shows a stage over its progress bar
+                if let Some(stage) = JobKind::Verify.stage() {
+                    ui.label(RichText::new(stage).color(t.text));
+                    ui.add_space(6.0);
+                }
                 self.progress_bar(ui);
             }
             Self::gap(ui);

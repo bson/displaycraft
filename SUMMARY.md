@@ -340,7 +340,8 @@ previous one succeeds, sharing one log and shown as "Step N: <activity>"
 above the progress bar (`App::stage_text()`, `JobKind::activity()`). The
 step (`App::run_step`) is 1 for calibrating and goes up each time dispcal's
 patch count starts over, which is its next calibration pass, then with
-each later job, so a run is usually 7 steps (3 passes). There's no "of
+each later job, so a run with 3 passes shows Steps 1 to 6 (naming the
+profile, between measuring and building it, isn't a numbered step). There's no "of
 N": how many passes there are isn't known beforehand. Files are named
 after `base`, in the data folder, `<output>-<YYYYMMDD-HHMMSS>`:
 

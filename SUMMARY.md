@@ -124,8 +124,10 @@
 
 ## Logo, icon and installing
 
-`assets/displaycraft.png` (1254x1254, RGBA) is the source. Its outer
-background is transparent: the original's dark background (17, 18, 23) was
+`assets/displaycraft.png` (1041x1041, RGBA) is the source: the laptop
+cropped to its edges and centred with a 3% margin (it fills 94% of the
+width), as Windows shows an icon's transparent margins as they are, so a
+smaller laptop looked small there. Its outer background is transparent: the original's dark background (17, 18, 23) was
 cleared where it connects to the image's edge, so the laptop's dark screen
 stays, and the anti-aliased edge pixels were given partial alpha with the
 background unmixed from their colour, so there's no dark fringe on light
@@ -133,8 +135,7 @@ backgrounds. `assets/icons/hicolor/<n>x<n>/apps/displaycraft.png` (16 to
 512) are made from it with `magick displaycraft.png -resize <n>x<n> -strip
 PNG32:<file>` (PNG32 keeps the alpha at small sizes); regenerate
 them when the source changes. The UI embeds the 256 one through
-`egui::include_image!` and `egui_extras`'s image loaders (`app::logo()`,
-drawn with rounded corners): above the step ladder (once per window, so not
+`egui::include_image!` and `egui_extras`'s image loaders (`app::logo()`): above the step ladder (once per window, so not
 again on the pages). `main.rs` also sets it
 as the window icon, which matters only when not installed: on Wayland the
 compositor takes the icon from the desktop entry matching the app id
@@ -335,9 +336,13 @@ saved; a correction file is.
 
 Making a profile is four jobs in a row (`JobKind::Calibrate`, `Targen`,
 `ProfileRead`, `Colprof`), each started by `App::next_stage()` when the
-previous one succeeds, sharing one log and shown as "Step N of 4" above the
-progress bar. Files are named after `base`,
-`$XDG_DATA_HOME/displaycraft/<output>-<YYYYMMDD-HHMMSS>`:
+previous one succeeds, sharing one log and shown as "Step N: <activity>"
+above the progress bar (`App::stage_text()`, `JobKind::activity()`). The
+step (`App::run_step`) is 1 for calibrating and goes up each time dispcal's
+patch count starts over, which is its next calibration pass, then with
+each later job, so a run is usually 7 steps (3 passes). There's no "of
+N": how many passes there are isn't known beforehand. Files are named
+after `base`, in the data folder, `<output>-<YYYYMMDD-HHMMSS>`:
 
 1. `dispcal -v -d D -c C [-y T|-X F] -m -q Q [-t K] -g G|s [-b B] -o
    work/<name>-quick.icc base` writes `base.cal`. `-m` skips the

@@ -86,15 +86,14 @@ enum JobKind {
 }
 
 impl JobKind {
-    /// What the job is doing, shown above its progress: where a
-    /// profile-making job is in the sequence
-    fn stage(self) -> Option<&'static str> {
+    /// What a profile-making job is doing, for "Step N: ..." (see
+    /// App::stage_text)
+    fn activity(self) -> Option<&'static str> {
         match self {
-            JobKind::Calibrate => Some("Step 1 of 4: calibrating"),
-            JobKind::Targen => Some("Step 2 of 4: choosing profile patches"),
-            JobKind::ProfileRead => Some("Step 3 of 4: measuring profile patches"),
-            JobKind::Colprof => Some("Step 4 of 4: building the profile"),
-            JobKind::Verify => Some("Measuring…"),
+            JobKind::Calibrate => Some("calibrating"),
+            JobKind::Targen => Some("choosing profile patches"),
+            JobKind::ProfileRead => Some("measuring profile patches"),
+            JobKind::Colprof => Some("building the profile"),
             _ => None,
         }
     }
@@ -377,6 +376,11 @@ pub struct App {
     /// When the running job started; Measure waits a while after it (see
     /// PLACING_TIME)
     job_started: Option<std::time::Instant>,
+    /// Where a calibration and profile run is, from 1. Each of dispcal's
+    /// calibration passes is a step of its own, as each runs its patch
+    /// count from the start again; how many there are isn't known
+    /// beforehand, hence no "of N".
+    run_step: u32,
     /// From Begin until the user says the instrument is in place: the first
     /// prompt (Argyll's "Place instrument on test window") is answered by
     /// the Measure button rather than shown
@@ -449,6 +453,7 @@ impl App {
             progress: None,
             prompt: None,
             job_started: None,
+            run_step: 0,
             placing: false,
             cancelled: false,
             status: None,
@@ -705,6 +710,15 @@ impl App {
         self.start_job(ctx, JobKind::Colprof, &bin, "colprof", &args);
     }
 
+    /// What's shown above a job's progress: "Step 3: calibrating" for a
+    /// profile run, "Measuring…" for a verification
+    fn stage_text(&self, kind: JobKind) -> Option<String> {
+        match kind {
+            JobKind::Verify => Some("Measuring…".into()),
+            k => k.activity().map(|a| format!("Step {}: {a}", self.run_step)),
+        }
+    }
+
     /// The chosen display, e.g. "eDP-1 (Sharp Corporation eDP-1)"
     fn display_label(&self) -> Option<String> {
         self.inventory.displays.get(self.display).map(|d| display_name(&d.description))
@@ -872,6 +886,11 @@ impl App {
         self.cancelled = false;
         self.status = None;
         self.job_started = Some(std::time::Instant::now());
+        match kind {
+            JobKind::Calibrate => self.run_step = 1,
+            JobKind::Targen | JobKind::ProfileRead | JobKind::Colprof => self.run_step += 1,
+            _ => {}
+        }
         let ctx = ctx.clone();
         match Job::start(bin, tool, args, move || ctx.request_repaint()) {
             Ok(job) => self.job = Some((kind, job)),
@@ -892,7 +911,14 @@ impl App {
                     self.log.push(line);
                 }
                 Event::Live(text) => self.adjust.live(&text),
-                Event::Progress(n, m) => self.progress = Some((n, m)),
+                Event::Progress(n, m) => {
+                    // The count starting over during calibration is
+                    // dispcal's next pass
+                    if kind == JobKind::Calibrate && self.progress.is_some_and(|(prev, _)| n < prev) {
+                        self.run_step += 1;
+                    }
+                    self.progress = Some((n, m));
+                }
                 Event::Prompt { prompt, before } => self.prompt = Some(prompt_message(&prompt, &before)),
             }
         }
@@ -915,7 +941,7 @@ impl App {
                         run.discard();
                     }
                     self.status = (!cancelled).then(|| {
-                        let stage = kind.stage().unwrap_or_default().split(": ").nth(1).unwrap_or_default().to_string();
+                        let stage = kind.activity().unwrap_or_default();
                         (false, format!("Stopped while {stage}. See the log."))
                     });
                     return;
@@ -2457,7 +2483,7 @@ impl App {
             }
         });
         if running.is_some_and(|k| k.step() == kind.step()) && message.is_none() && !self.adjust.active() {
-            if let Some(stage) = running.and_then(JobKind::stage) {
+            if let Some(stage) = running.and_then(|k| self.stage_text(k)) {
                 ui.add_space(4.0);
                 ui.label(RichText::new(stage).color(t.text));
             }
@@ -2585,7 +2611,7 @@ impl App {
                 self.job_controls(ui, JobKind::Verify, false, false);
             } else {
                 // As job_controls() shows a stage over its progress bar
-                if let Some(stage) = JobKind::Verify.stage() {
+                if let Some(stage) = self.stage_text(JobKind::Verify) {
                     ui.label(RichText::new(stage).color(t.text));
                     ui.add_space(6.0);
                 }
@@ -2746,7 +2772,6 @@ impl App {
 fn logo(size: f32) -> egui::Image<'static> {
     egui::Image::new(egui::include_image!("../assets/icons/hicolor/256x256/apps/displaycraft.png"))
         .fit_to_exact_size(egui::vec2(size, size))
-        .corner_radius((size * 0.14) as u8)
 }
 
 /// A row of choices on the Settings page, spaced apart and wrapped when the

@@ -374,6 +374,9 @@ pub struct App {
     log: Vec<String>,
     progress: Option<(u32, u32)>,
     prompt: Option<String>,
+    /// When the running job started; Measure waits a while after it (see
+    /// PLACING_TIME)
+    job_started: Option<std::time::Instant>,
     /// From Begin until the user says the instrument is in place: the first
     /// prompt (Argyll's "Place instrument on test window") is answered by
     /// the Measure button rather than shown
@@ -445,6 +448,7 @@ impl App {
             log: Vec::new(),
             progress: None,
             prompt: None,
+            job_started: None,
             placing: false,
             cancelled: false,
             status: None,
@@ -790,7 +794,7 @@ impl App {
             }
         }
         // The profile's prediction for each patch (quick, so not a job)
-        let out = std::process::Command::new(bin.join("fakeread")).arg(&profile).arg(&expected).output();
+        let out = argyll::command(bin.join("fakeread")).arg(&profile).arg(&expected).output();
         match out {
             Ok(o) if o.status.success() => {}
             Ok(o) => return fail(self, format!("fakeread failed: {}", String::from_utf8_lossy(&o.stderr).trim())),
@@ -819,7 +823,7 @@ impl App {
         let measured = run.base.with_file_name(format!("{name}-measured.ti3"));
         // -N: each reading relative to its own white, so a changed backlight
         // setting isn't counted as error; -k: CIEDE2000
-        let out = std::process::Command::new(bin.join("colverify"))
+        let out = argyll::command(bin.join("colverify"))
             .args(["-v", "2", "-N", "-k"])
             .arg(&expected)
             .arg(&measured)
@@ -865,6 +869,7 @@ impl App {
         self.placing = matches!(kind, JobKind::Calibrate | JobKind::Verify | JobKind::Report | JobKind::Adjust);
         self.cancelled = false;
         self.status = None;
+        self.job_started = Some(std::time::Instant::now());
         let ctx = ctx.clone();
         match Job::start(bin, tool, args, move || ctx.request_repaint()) {
             Ok(job) => self.job = Some((kind, job)),
@@ -2418,8 +2423,14 @@ impl App {
                 }
                 (_, Some(_)) => {
                     if message.is_some() {
-                        // Before Argyll asks, there's nothing to answer yet
-                        let can = self.prompt.is_some();
+                        // Before Argyll asks, there's nothing to answer yet.
+                        // And the placement message stays up a while first,
+                        // to be read, even when Argyll asks at once.
+                        let waited = self.job_started.map_or(PLACING_TIME, |t| t.elapsed());
+                        if self.prompt.is_some() && waited < PLACING_TIME {
+                            ui.ctx().request_repaint_after(PLACING_TIME - waited);
+                        }
+                        let can = self.prompt.is_some() && waited >= PLACING_TIME;
                         if ui.add_enabled(can, egui::Button::new(RichText::new("Measure").font(t.semibold(13.0)))).clicked() {
                             if let Some((_, job)) = self.job.as_mut() {
                                 job.send_key(' ');
@@ -2841,6 +2852,10 @@ fn with_field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         add(ui);
     });
 }
+
+/// How long Measure stays disabled after a measuring job starts, so the
+/// placement message is up long enough to read
+const PLACING_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Why Begin is disabled with no instrument connected
 const NO_INSTRUMENT: &str = "No instrument.";

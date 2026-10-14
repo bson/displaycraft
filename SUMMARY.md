@@ -20,12 +20,13 @@
   per OS, chosen with `cfg` (`system::current()`): the bundled variants
   Preferences offers (`Variant`: label and display system, the default
   first), where the bundled ArgyllCMS is (`bundled_dir()`), and why it's
-  missing. Linux: auto, KDE + Wayland and GNOME, KDE + X11, with
+  missing. Linux: auto, KDE + Wayland and GNOME, KDE + Xorg, with
   `/opt/argyll-kde-wayland/bin` standing in when run from source. macOS
   (`MacOs`): one "Bundled ArgyllCMS", in `Contents/Resources/argyll/bin`
   of the app the executable is in, or when run from source, of an
-  installed `DisplayCraft.app` (`/Applications`, then `~/Applications`). Windows (`Single`, not yet packaged):
-  one "Bundled ArgyllCMS", from `$DISPLAYCRAFT_ARGYLL_BIN`. Also `open()`,
+  installed `DisplayCraft.app` (`/Applications`, then `~/Applications`).
+  Windows (`Single`, not yet packaged): one "Bundled ArgyllCMS", in
+  `argyll\bin` beside `displaycraft.exe` (or `$DISPLAYCRAFT_ARGYLL_BIN`). Also `open()`,
   for files and links: xdg-open, `open` on macOS, `cmd /C start ""` on
   Windows. `live_output()` (see Running ArgyllCMS). `data_dir()` and
   `config_dir()`: Linux the XDG base directories plus `displaycraft`
@@ -42,6 +43,18 @@
   compile (`cargo check`) for `aarch64-apple-darwin` and
   `x86_64-pc-windows-gnu`; the kscreen-doctor parsing in `profiles.rs` is
   Linux-only.
+- Windows: release builds are GUI programs (`windows_subsystem` in
+  `main.rs`), and every ArgyllCMS program is started with
+  `CREATE_NO_WINDOW` (`system::no_console()`, through `argyll::told()`),
+  or each would open a console window. Each live program joins a job
+  object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`system::adopt()`,
+  windows-sys), so it ends with DisplayCraft however DisplayCraft ends.
+  `Job::send_key()` adds a line end there, as ArgyllCMS reads a piped
+  stdin a line at a time on Windows. Cancel ends the program outright
+  (no signals), so ArgyllCMS doesn't undo display changes as it does on
+  SIGTERM elsewhere. Built so far in a WinBoat VM: Rust's
+  `x86_64-pc-windows-gnu` toolchain and WinLibs' MinGW-w64, from scratch
+  scripts; packaging and a GitHub job are still to come.
 - Messages DisplayCraft shows say "KDE", never "KWin". ArgyllCMS's session
   report is reworded as it's read (`argyll::as_shown()`: "KDE Plasma
   (KWin)" and "KDE Plasma's KWin" become "KDE Plasma", other "KWin" "KDE"),
@@ -236,7 +249,8 @@ inline.
 - Prompts are answered on the page (`App::job_controls()`), not in a
   dialog. From Begin until the first prompt is answered (`placing`), the page
   asks for the instrument to be placed at the center of the screen, with
-  Measure (enabled once Argyll has asked) and Cancel. Argyll prints "Place
+  Measure (enabled once Argyll has asked, and at least 5 s after the job
+  started, `PLACING_TIME`, so the message can be read) and Cancel. Argyll prints "Place
   instrument on test window." as a complete line, so its placement prompt
   arrives as just the key instructions; with those removed it is shown as
   "With the spectro on the patch, press Measure to begin."

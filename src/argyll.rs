@@ -59,7 +59,7 @@ impl WindowSystem {
     pub fn label(self) -> &'static str {
         match self {
             WindowSystem::Wayland => "KDE + Wayland",
-            WindowSystem::X11 => "GNOME, KDE + X11",
+            WindowSystem::X11 => "GNOME, KDE + Xorg",
         }
     }
 }
@@ -78,12 +78,14 @@ pub fn set_window_system(ws: Option<WindowSystem>) {
 }
 
 /// An ArgyllCMS program, told which display system to use
-fn command(program: impl AsRef<OsStr>) -> Command {
+pub fn command(program: impl AsRef<OsStr>) -> Command {
     told(Command::new(program))
 }
 
 /// `cmd`, which runs an ArgyllCMS program, told which display system to use
+/// (and without a console window, see system::no_console)
 fn told(mut cmd: Command) -> Command {
+    crate::system::no_console(&mut cmd);
     if let Some(ws) = *WINDOW_SYSTEM.lock().unwrap() {
         cmd.env("ARGYLL_WINDOW_SYSTEM", ws.name());
     }
@@ -185,6 +187,7 @@ pub fn check_platform(bin: &Path) -> Session {
 /// None lets ArgyllCMS choose
 pub fn check_platform_as(bin: &Path, ws: Option<WindowSystem>) -> Session {
     let mut cmd = Command::new(bin.join("dispwin"));
+    crate::system::no_console(&mut cmd);
     match ws {
         Some(ws) => cmd.env("ARGYLL_WINDOW_SYSTEM", ws.name()),
         None => cmd.env_remove("ARGYLL_WINDOW_SYSTEM"),
@@ -402,6 +405,7 @@ impl Job {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        crate::system::adopt(&child);
         let stdin = child.stdin.take();
         let (tx, rx) = mpsc::channel();
         let wake = std::sync::Arc::new(wake);
@@ -421,8 +425,13 @@ impl Job {
 
     /// Answer a prompt: any key continues, 'q' gives up.
     pub fn send_key(&mut self, key: char) {
+        // On Windows ArgyllCMS reads a piped stdin a line at a time (and
+        // discards the line end), so the key alone would leave it waiting.
+        // Elsewhere it reads single keys, and a line end would answer the
+        // next prompt.
+        let text = if cfg!(windows) { format!("{key}\n") } else { key.to_string() };
         if let Some(stdin) = self.stdin.as_mut() {
-            let _ = stdin.write_all(key.to_string().as_bytes());
+            let _ = stdin.write_all(text.as_bytes());
             let _ = stdin.flush();
         }
     }
@@ -438,8 +447,17 @@ impl Job {
 
     /// Stop the tool. SIGTERM lets dispwin's signal handler restore the
     /// display's color settings, which SIGKILL wouldn't.
+    #[cfg(unix)]
     pub fn cancel(&mut self) {
         let _ = Command::new("kill").arg("-TERM").arg(self.child.id().to_string()).status();
+    }
+
+    /// Stop the tool. Windows has no signals, so it's ended outright, and
+    /// ArgyllCMS doesn't get to undo display changes (e.g. calibration
+    /// curves loaded while measuring) as it does on SIGTERM elsewhere.
+    #[cfg(not(unix))]
+    pub fn cancel(&mut self) {
+        let _ = self.child.kill();
     }
 }
 

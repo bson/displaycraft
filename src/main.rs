@@ -1,3 +1,7 @@
+// A Windows GUI program, so there's no console window beside DisplayCraft's
+// own. Debug builds keep the console, for their output.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod adjust;
 mod app;
 mod argyll;

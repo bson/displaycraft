@@ -71,6 +71,73 @@ pub trait System: Sync {
     }
 }
 
+/// Run `cmd` without a console window of its own. On Windows a console
+/// program started from a GUI program gets one, which would flash up for
+/// every ArgyllCMS program DisplayCraft runs. Nothing to do elsewhere.
+pub fn no_console(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Make `child` end when DisplayCraft does, however DisplayCraft ends. On
+/// Windows a started program outlives its parent, so each is put in a job
+/// object that kills its processes when DisplayCraft's handle to it closes,
+/// which Windows does at exit even after a crash. Elsewhere a Job that's
+/// dropped cancels its program (argyll::Job's Drop), and nothing more is
+/// done here.
+pub fn adopt(child: &std::process::Child) {
+    #[cfg(windows)]
+    windows_job::adopt(child);
+    #[cfg(not(windows))]
+    let _ = child;
+}
+
+#[cfg(windows)]
+mod windows_job {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+
+    /// Never closed: closing is what kills the processes, at exit
+    struct Job(HANDLE);
+    // A handle is just a number to the kernel, usable from any thread
+    unsafe impl Send for Job {}
+    unsafe impl Sync for Job {}
+
+    static JOB: OnceLock<Option<Job>> = OnceLock::new();
+
+    pub fn adopt(child: &std::process::Child) {
+        let job = JOB.get_or_init(|| unsafe {
+            let h = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if h.is_null() {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+            if SetInformationJobObject(h, JobObjectExtendedLimitInformation, &info as *const _ as *const _, size) == 0 {
+                CloseHandle(h);
+                return None;
+            }
+            Some(Job(h))
+        });
+        if let Some(job) = job {
+            unsafe {
+                AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE);
+            }
+        }
+    }
+}
+
 fn home() -> Option<PathBuf> {
     std::env::home_dir()
 }
@@ -84,7 +151,7 @@ impl System for Linux {
         &[
             Variant { label: "Bundled ArgyllCMS (auto)", window_system: None },
             Variant { label: "Bundled ArgyllCMS (KDE + Wayland)", window_system: Some(WindowSystem::Wayland) },
-            Variant { label: "Bundled ArgyllCMS (GNOME, KDE + X11)", window_system: Some(WindowSystem::X11) },
+            Variant { label: "Bundled ArgyllCMS (GNOME, KDE + Xorg)", window_system: Some(WindowSystem::X11) },
         ]
     }
 
@@ -234,13 +301,22 @@ impl System for Single {
         &[Variant { label: "Bundled ArgyllCMS", window_system: None }]
     }
 
+    /// In the argyll\bin folder beside DisplayCraft's program
+    fn bundled_dir(&self) -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("DISPLAYCRAFT_ARGYLL_BIN") {
+            return Some(PathBuf::from(dir));
+        }
+        let dir = std::env::current_exe().ok()?.parent()?.join("argyll").join("bin");
+        dir.join("dispcal.exe").exists().then_some(dir)
+    }
+
     fn no_bundled(&self) -> &'static str {
         "There's no bundled ArgyllCMS: DisplayCraft wasn't started from its installed package"
     }
 
     fn open(&self, target: &OsStr) {
         // start's first quoted argument is a window title, hence the ""
-        let _ = Command::new("cmd").args(["/C", "start", ""]).arg(target).spawn();
+        let _ = no_console(Command::new("cmd").args(["/C", "start", ""]).arg(target)).spawn();
     }
 
     fn data_dir(&self) -> Option<PathBuf> {

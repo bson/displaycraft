@@ -381,9 +381,6 @@ pub enum Event {
     /// failed reading. `before` is the last few lines printed before it,
     /// which say what went wrong, if anything; they come as Lines too.
     Prompt { prompt: String, before: Vec<String> },
-    /// A reading dispcal rewrites in place during interactive adjustment
-    /// ("/ Current Br 117.34, ..."). Not logged: there's one a second.
-    Live(String),
 }
 
 /// A running Argyll tool.
@@ -515,10 +512,11 @@ fn read_output(mut stream: Box<dyn Read + Send>, tx: Sender<Event>, wake: impl F
         }
         // A prompt has no newline, so look at what's left over
         let rest = clean(&pending);
-        // A live reading is ended only by the "\r" that starts the next
-        // one, so it's passed on now and dropped
+        // dispcal's single-control adjustments rewrite a reading in place
+        // ("/ Current Br 117.34, ..."), ended only by the "\r" of the next.
+        // DisplayCraft doesn't use them, but should one turn up it's
+        // dropped rather than left to pile up
         if rest.trim_start_matches(['/', '\\', ' ']).starts_with("Current ") {
-            let _ = tx.send(Event::Live(rest));
             pending.clear();
             wake();
             continue;

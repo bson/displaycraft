@@ -7,7 +7,7 @@ use std::sync::mpsc::Receiver;
 
 use egui::{Align, Layout, RichText, ScrollArea};
 
-use crate::adjust::{self, Dir};
+use crate::adjust::{self, Point};
 use crate::argyll::{self, Event, Inventory, Job, Platform, Session, WindowSystem};
 use crate::charts;
 use crate::corrections::{self, Correction};
@@ -408,9 +408,6 @@ pub struct App {
     cal_run: Option<CalRun>,
     /// dispcal's interactive adjustment, while it runs
     adjust: adjust::State,
-    /// What the adjustment panel last showed (menu, or a mode), so it's
-    /// scrolled into view when that changes
-    adjust_shown: Option<Option<adjust::Mode>>,
     outcome: Option<Outcome>,
     corrections: Vec<Correction>,
     /// A file chosen with Browse, picked on its own thread
@@ -483,7 +480,6 @@ impl App {
             status: None,
             cal_run: None,
             adjust: adjust::State::default(),
-            adjust_shown: None,
             outcome: None,
             corrections: Vec::new(),
             correction_picker: None,
@@ -939,9 +935,9 @@ impl App {
         self.progress = None;
         self.prompt = None;
         self.adjust = adjust::State::default();
-        self.adjust_shown = None;
         // Jobs that measure start by asking for the instrument to be placed
-        self.placing = matches!(kind, JobKind::Calibrate | JobKind::Verify | JobKind::Report | JobKind::Adjust);
+        // (Adjusting places the instrument before it starts)
+        self.placing = matches!(kind, JobKind::Calibrate | JobKind::Verify | JobKind::Report);
         self.cancelled = false;
         self.status = None;
         self.job_started = Some(std::time::Instant::now());
@@ -969,7 +965,6 @@ impl App {
                     }
                     self.log.push(line);
                 }
-                Event::Live(text) => self.adjust.live(&text),
                 Event::Progress(n, m) => {
                     // The count starting over during calibration is
                     // dispcal's next pass
@@ -978,8 +973,20 @@ impl App {
                     }
                     self.progress = Some((n, m));
                 }
+                // Adjusting measures from the start: the instrument goes on
+                // the screen before Adjust is pressed. Only the placement
+                // prompt is answered; others (a spectrophotometer's
+                // calibration tile, a retry) still wait for the user.
+                Event::Prompt { before, .. } if kind == JobKind::Adjust && before.iter().any(|l| l.contains("Place instrument on test window")) => {
+                    job.send_key(' ');
+                }
                 Event::Prompt { prompt, before } => self.prompt = Some(prompt_message(&prompt, &before)),
             }
+        }
+        // Back at dispcal's menu: check again, or leave if Done was pressed
+        if kind == JobKind::Adjust && self.adjust.menu {
+            job.send_key(if self.adjust.stopping { '8' } else { '5' });
+            self.adjust.menu = false;
         }
         let Some(code) = job.try_wait() else { return };
         // Pick up anything printed just before exit
@@ -1773,48 +1780,7 @@ impl App {
         let before = self.settings.targets.clone();
         let running = self.job.is_some();
         let ready = self.ready().is_ok();
-        let mut adjust_clicked = false;
         Self::gap(ui);
-        ui.horizontal(|ui| {
-            ui.label("Display controls");
-            ui.add_space(8.0);
-            if ui
-                .add_enabled(!running && ready, egui::Button::new("Adjust…"))
-                .on_hover_text(
-                    "Set the display's own white point, brightness and black level from its menus while \
-                     DisplayCraft shows how close they are to the targets below. Worth it for monitors with those \
-                     controls; laptop panels usually have only brightness.",
-                )
-                .clicked()
-            {
-                adjust_clicked = true;
-            }
-        });
-        // An adjustment runs right here, near the top, so its buttons are in
-        // view: further down they could be scrolled off, where clicks don't
-        // reach them
-        if self.job.as_ref().is_some_and(|(k, _)| *k == JobKind::Adjust) {
-            // The placement prompt, or nothing once dispcal is past it
-            if self.placing || self.prompt.is_some() || !self.adjust.active() {
-                Self::gap(ui);
-                let controls = ui.scope(|ui| {
-                    self.job_controls(ui, JobKind::Adjust, false, true);
-                });
-                if self.prompt.is_some() && self.adjust_shown.is_none() {
-                    controls.response.scroll_to_me(Some(Align::Max));
-                }
-            }
-            if self.adjust.active() {
-                Self::gap(ui);
-                self.adjust_panel(ui);
-            }
-            Self::gap(ui);
-            self.cancel_button(ui);
-        }
-        // A row more than the usual gap, setting the targets apart from the
-        // display controls above
-        Self::gap(ui);
-        ui.add_space(ui.text_style_height(&egui::TextStyle::Body));
         ui.label("Choose what the calibration and profiling should aim for:");
         Self::gap(ui);
         if let Some(name) = self.reference_file_name().filter(|_| self.reference.is_some()) {
@@ -1929,11 +1895,35 @@ impl App {
             self.save_settings();
         }
 
+        // Below the targets it's set to aim for, which it takes when it
+        // starts
+        Self::gap(ui);
+        ui.add_space(ui.text_style_height(&egui::TextStyle::Body));
+        let mut adjust_clicked = false;
+        ui.horizontal(|ui| {
+            ui.label("Display controls");
+            ui.add_space(8.0);
+            if ui
+                .add_enabled(!running && ready, egui::Button::new("Adjust…"))
+                .on_hover_text(
+                    "Set the display's own controls (white point, brightness, black level, gamma or contrast) from \
+                     its menus while DisplayCraft reads black, 50% gray and white over and over, uncalibrated, against \
+                     the targets above. Put the instrument on the middle of the display first: measuring starts at \
+                     once, in a window of its own.",
+                )
+                .clicked()
+            {
+                adjust_clicked = true;
+            }
+        });
+        if self.job.as_ref().is_some_and(|(k, _)| *k == JobKind::Adjust) {
+            Self::gap(ui);
+            Self::context_line(ui, "Adjusting, in its own window.".into());
+        }
         if adjust_clicked {
             let ctx = ui.ctx().clone();
             self.start_adjust(&ctx);
         }
-
     }
 
     /// Run dispcal's adjustment of the display's own controls, toward the
@@ -2665,82 +2655,130 @@ impl App {
         }
     }
 
-    /// dispcal's adjustment menu, or the live readings of one adjustment
-    fn adjust_panel(&mut self, ui: &mut egui::Ui) {
-        let t = Tokens::get(ui.ctx());
-        let mut key = None;
-        let panel = egui::Frame::new().fill(t.inset).corner_radius(4).inner_margin(12).show(ui, |ui| {
-            ui.set_min_width(ui.available_width().min(560.0));
-            match self.adjust.mode {
-                None => {
-                    ui.label(RichText::new("Adjust the display's controls").font(t.semibold(14.0)).color(t.text));
-                    ui.add_space(4.0);
-                    ui.label(
-                        "Use the display's own menus to bring it close to the targets above, so calibration has less \
-                         to correct. Choose what to adjust; readings update about once a second.",
-                    );
-                    Self::gap(ui);
-                    ui.horizontal_wrapped(|ui| {
-                        for mode in adjust::Mode::ALL {
-                            if ui.button(mode.label()).on_hover_text(format!("Turn {}", mode.controls())).clicked() {
-                                key = Some(mode.key());
-                            }
-                        }
-                    });
-                    Self::gap(ui);
-                    if ui.button(RichText::new("Finish").font(t.semibold(13.0))).on_hover_text("Leave the display as adjusted").clicked() {
-                        key = Some('8');
+    /// The adjustment, in a window of its own while dispcal runs: starting
+    /// up (or a prompt DisplayCraft doesn't answer itself), then the
+    /// readings. Closing it is Done; the window stays until dispcal has
+    /// left, as it would otherwise run on with nothing to stop it.
+    fn adjust_window(&mut self, ctx: &egui::Context) {
+        let t = Tokens::get(ctx);
+        let builder = egui::ViewportBuilder::default()
+            .with_title("DisplayCraft: Adjust display controls")
+            .with_app_id("displaycraft")
+            .with_inner_size([640.0, 600.0])
+            .with_min_inner_size([560.0, 520.0]);
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("adjust"), builder, |ui, class| {
+            let contents = |app: &mut App, ui: &mut egui::Ui| {
+                ui.label(RichText::new("Open the spectro or colorimeter and place it on the measurement area.").font(t.semibold(14.0)).color(t.text));
+                ui.label(RichText::new("The area is in the middle of the display. If this window covers it, move the window aside.").color(t.text_dim));
+                Self::gap(ui);
+                if app.adjust.active() {
+                    app.adjust_panel(ui);
+                } else {
+                    // job_controls shows a prompt with Measure, or Cancel
+                    // alone while the instrument starts
+                    if app.prompt.is_none() {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Starting the instrument…");
+                        });
+                        Self::gap(ui);
                     }
+                    app.job_controls(ui, JobKind::Adjust, true, true);
                 }
-                Some(mode) => {
-                    ui.label(RichText::new(mode.label()).font(t.semibold(14.0)).color(t.text));
-                    ui.add_space(4.0);
-                    ui.label(format!("Turn {} until the arrows settle on =, then press Done.", mode.controls()));
-                    if let Some(target) = &self.adjust.target {
-                        ui.add_space(4.0);
-                        Self::context_line(ui, adjust::target_text(target));
-                    }
-                    Self::gap(ui);
-                    match &self.adjust.reading {
-                        None => {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label("Measuring…");
-                            });
-                        }
-                        Some(r) => reading_view(ui, r),
-                    }
-                    Self::gap(ui);
-                    if ui.button(RichText::new("Done").font(t.semibold(13.0))).clicked() {
-                        key = Some(' ');
-                    }
+            };
+            if class == egui::ViewportClass::EmbeddedWindow {
+                contents(self, ui);
+            } else {
+                egui::CentralPanel::default().frame(egui::Frame::new().fill(t.canvas).inner_margin(16)).show(ui, |ui| contents(self, ui));
+            }
+            if ui.ctx().input(|i| i.viewport().close_requested()) {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if self.adjust.active() {
+                    self.adjust.stopping = true;
+                } else if let Some((_, job)) = self.job.as_mut() {
+                    // Nothing measured yet: nothing to finish
+                    job.cancel();
+                    self.cancelled = true;
                 }
             }
         });
-        // Bring the whole panel, Done included, into view when it changes
-        // between the menu and an adjustment
-        let shown = Some(self.adjust.mode);
-        if self.adjust_shown != shown {
-            self.adjust_shown = shown;
-            panel.response.scroll_to_me(Some(Align::Max));
+    }
+
+    /// The adjustment's readings: a bar each for black, 50% gray and white
+    /// against its target, with how far each is from the target white
+    fn adjust_panel(&mut self, ui: &mut egui::Ui) {
+        let t = Tokens::get(ui.ctx());
+        let tg = &self.settings.targets;
+        let a = &self.adjust;
+        let mut done = false;
+        let mut cancel = false;
+        egui::Frame::new().fill(t.inset).corner_radius(4).inner_margin(12).show(ui, |ui| {
+            ui.label(RichText::new("Adjust the display's controls").font(t.semibold(14.0)).color(t.text));
+            ui.add_space(4.0);
+            ui.label(
+                "Black, 50% gray and white are read over and over, uncalibrated. Use the display's own menus to bring \
+                 each bar to its line and its color to the target white. The 50% line follows the black and white \
+                 measured.",
+            );
+            Self::gap(ui);
+            let target = match (a.target_xy, a.reference_xy()) {
+                (Some((x, y)), _) => format!("Target white: {:.0} K (x {x:.4}, y {y:.4})", report::cct((x, y))),
+                (None, Some((x, y))) => format!("Target white: native, {:.0} K (x {x:.4}, y {y:.4})", report::cct((x, y))),
+                (None, None) => "Target white: waiting for the first reading".into(),
+            };
+            ui.label(RichText::new(target).font(t.semibold(13.0)).color(t.text));
+            Self::gap(ui);
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 28.0;
+                for p in Point::ALL {
+                    let goal = match p {
+                        Point::Black => tg.set_black.then_some(tg.black),
+                        Point::Mid => a.target_mid,
+                        Point::White => tg.set_brightness.then_some(tg.brightness),
+                    };
+                    // Device black and native brightness have no level to aim for
+                    let device = matches!(p, Point::Black | Point::White) && goal.is_none();
+                    adjust_bar(ui, p, a.reading(p), goal, device, a.reference_xy());
+                }
+            });
+            Self::gap(ui);
+            ui.horizontal(|ui| {
+                if a.stopping {
+                    ui.spinner();
+                    ui.label("Finishing after this reading…");
+                } else {
+                    if ui.button(RichText::new("Done").font(t.semibold(13.0))).on_hover_text("Leave the display as adjusted").clicked() {
+                        done = true;
+                    }
+                    if ui.button("Cancel").on_hover_text("Stop at once, without finishing the reading").clicked() {
+                        cancel = true;
+                    }
+                    if a.checking {
+                        ui.spinner();
+                        ui.label(RichText::new("Reading…").color(t.text_dim));
+                    }
+                }
+            });
+        });
+        if done {
+            self.adjust.stopping = true;
         }
-        if let (Some(k), Some((_, job))) = (key, self.job.as_mut()) {
-            job.send_key(k);
-            // Shown as busy until dispcal's next line says what it's doing
-            self.adjust.menu = false;
-            if k == '8' {
-                self.adjust = adjust::State::default();
-            }
+        if cancel {
+            self.cancel_job();
         }
     }
 
     fn cancel_button(&mut self, ui: &mut egui::Ui) {
         if ui.add_enabled(!self.cancelled, egui::Button::new("Cancel")).clicked() {
-            if let Some((_, job)) = self.job.as_mut() {
-                job.cancel();
-            }
-            self.cancelled = true;
+            self.cancel_job();
         }
+    }
+
+    fn cancel_job(&mut self) {
+        if let Some((_, job)) = self.job.as_mut() {
+            job.cancel();
+        }
+        self.cancelled = true;
     }
 
     /// Begin, and while a job runs, what it's waiting for and Cancel.
@@ -3143,56 +3181,57 @@ fn profile_charts(ui: &mut egui::Ui, name: &str, curves: Option<&profiles::Curve
     });
 }
 
-/// A live adjustment reading: the level, and for color adjustments the
-/// chromaticity, the error and which way to turn each channel
-fn reading_view(ui: &mut egui::Ui, r: &adjust::Reading) {
+/// How close an adjustment bar's level is to its goal for green, and for
+/// yellow (red beyond), as a fraction. Around 2% is about the smallest
+/// luminance difference seen side by side.
+const BAR_CLOSE: f64 = 0.02;
+const BAR_NEAR: f64 = 0.05;
+/// The same for the color's CIEDE2000 from the target white
+const DE_CLOSE: f64 = 1.0;
+const DE_NEAR: f64 = 3.0;
+
+/// One point's bar: its luminance against the goal (the line across the
+/// middle; the bar runs from half to double it), then the reading, the goal,
+/// and the color's temperature and CIEDE2000 from the target white. With no
+/// goal (device black or native white) the bar is greyed, but the reading
+/// and its color are still shown.
+fn adjust_bar(ui: &mut egui::Ui, p: Point, reading: Option<[f64; 3]>, goal: Option<f64>, device: bool, white: Option<(f64, f64)>) {
     let t = Tokens::get(ui.ctx());
-    let arrow = |d: Dir| match d {
-        Dir::Up => "▲",
-        Dir::Down => "▼",
-        Dir::Hold => "=",
-    };
-    let big = |text: String, color: egui::Color32| RichText::new(text).font(t.semibold(20.0)).color(color);
-    egui::Grid::new("reading").num_columns(2).spacing([20.0, 8.0]).show(ui, |ui| {
-        ui.label("Level");
-        let level = match r.level_dir {
-            Some(d) => format!("{:.1} cd/m²  {}", r.level, arrow(d)),
-            None => format!("{:.1} cd/m²", r.level),
+    ui.vertical(|ui| {
+        ui.set_width(150.0);
+        ui.label(RichText::new(p.label()).font(t.semibold(13.0)).color(if device { t.text_dim } else { t.text }));
+        ui.add_space(4.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(44.0, 170.0), egui::Sense::hover());
+        let painter = ui.painter_at(rect.expand(2.0));
+        let outline = if device { t.text_dim.gamma_multiply(0.5) } else { t.text_dim };
+        painter.rect_stroke(rect, 3.0, egui::Stroke::new(1.0, outline), egui::StrokeKind::Inside);
+        let level = reading.map(|c| c[1]);
+        if let (Some(y), Some(g)) = (level, goal.filter(|g| *g > 0.0)) {
+            let ratio = (y / g).max(1e-6);
+            // log2: half the goal at the bottom, double at the top
+            let pos = (ratio.log2().clamp(-1.0, 1.0) + 1.0) / 2.0;
+            let top = rect.bottom() - pos as f32 * rect.height();
+            let off = (ratio - 1.0).abs();
+            let color = if off <= BAR_CLOSE { t.good } else if off <= BAR_NEAR { t.caution } else { t.bad };
+            painter.rect_filled(egui::Rect::from_min_max(egui::pos2(rect.left() + 3.0, top), egui::pos2(rect.right() - 3.0, rect.bottom() - 3.0)), 2.0, color.gamma_multiply(0.8));
+            painter.line_segment([egui::pos2(rect.left() - 2.0, rect.center().y), egui::pos2(rect.right() + 2.0, rect.center().y)], egui::Stroke::new(2.0, t.text));
+        }
+        ui.add_space(4.0);
+        let dim = |ui: &mut egui::Ui, text: String| ui.label(RichText::new(text).small().color(t.text_dim));
+        let lum = |v: f64| if v < 10.0 { format!("{v:.3} cd/m²") } else { format!("{v:.1} cd/m²") };
+        match level {
+            Some(y) => ui.label(RichText::new(lum(y)).color(if device { t.text_dim } else { t.text })),
+            None => ui.label(RichText::new("—").color(t.text_dim)),
         };
-        ui.label(big(level, t.text));
-        ui.end_row();
-        if let Some(((x, dx), (y, dy))) = r.xy {
-            ui.label("Chromaticity");
-            ui.label(big(format!("x {x:.4} {}   y {y:.4} {}", arrow(dx), arrow(dy)), t.text));
-            ui.end_row();
-        }
-        if let Some(de) = r.de {
-            ui.label("Off target");
-            let color = if de <= 1.0 { t.good } else if de <= 3.0 { t.caution } else { t.bad };
-            ui.label(big(format!("ΔE {de:.1}"), color));
-            ui.end_row();
-        }
-        if let Some(rgb) = r.rgb {
-            ui.label("Turn");
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 24.0;
-                for ((name, color), (dir, first)) in [("Red", egui::Color32::from_rgb(230, 80, 80)), ("Green", egui::Color32::from_rgb(90, 200, 100)), ("Blue", egui::Color32::from_rgb(100, 140, 255))]
-                    .into_iter()
-                    .zip(rgb)
-                {
-                    let text = format!("{name} {}", match dir {
-                        Dir::Up => "up",
-                        Dir::Down => "down",
-                        Dir::Hold => "=",
-                    });
-                    let mut rt = RichText::new(text).font(t.semibold(if first { 18.0 } else { 15.0 })).color(color);
-                    if first {
-                        rt = rt.underline();
-                    }
-                    ui.label(rt).on_hover_text(if first { "Turn this one first" } else { "" });
-                }
-            });
-            ui.end_row();
+        match goal {
+            Some(g) => dim(ui, format!("target {}", lum(g))),
+            None if device => dim(ui, if p == Point::Black { "device black".into() } else { "native brightness".into() }),
+            None => dim(ui, "target after the first reading".into()),
+        };
+        if let Some(d) = reading.zip(white).and_then(|(c, w)| adjust::deviation(c, w)) {
+            ui.label(RichText::new(format!("{:.0} K ({:+.0} K)", d.cct, d.cct_diff)).color(t.text));
+            let color = if d.de <= DE_CLOSE { t.good } else if d.de <= DE_NEAR { t.caution } else { t.bad };
+            ui.label(RichText::new(format!("ΔE {:.1}", d.de)).color(color));
         }
     });
 }
@@ -3370,7 +3409,6 @@ impl eframe::App for App {
                 Step::Instrument => {
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.page_instrument(ui));
                 }
-                // The adjustment panel makes it taller than the window
                 Step::Targets => {
                     ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.page_targets(ui));
                 }
@@ -3386,6 +3424,9 @@ impl eframe::App for App {
                 }
             }
         });
+        if self.job.as_ref().is_some_and(|(k, _)| *k == JobKind::Adjust) {
+            self.adjust_window(&ctx);
+        }
     }
 
     fn on_exit(&mut self) {
@@ -3590,10 +3631,10 @@ mod hardware_adjust_tests {
 
     use super::*;
 
-    /// Runs the display controls adjustment from the Settings page with the
-    /// real ArgyllCMS and instrument: places the instrument, measures the
-    /// white point for a few readings (pictured in tmp/page-adjusting.png),
-    /// then finishes. Measures only.
+    /// Runs the display controls adjustment from the Parameters page with
+    /// the real ArgyllCMS and instrument (already on the screen): lets two
+    /// checks of black, 50% gray and white finish (pictured in
+    /// tmp/page-adjusting.png), then finishes. Measures only.
     #[test]
     #[ignore = "needs ArgyllCMS, an instrument on the screen, and a GPU"]
     fn adjust_through_settings() {
@@ -3614,22 +3655,15 @@ mod hardware_adjust_tests {
             }
             harness.run_steps(2);
         };
-        wait(&mut harness, "the placement prompt", &|a| a.prompt.is_some());
-        harness.get_by_label("Measure").click();
-        wait(&mut harness, "the menu", &|a| a.adjust.menu);
-        // "White point" is also a row label on the page
-        harness.get_by_role_and_label(egui::accesskit::Role::Button, "White point").click();
-        wait(&mut harness, "readings", &|a| a.adjust.reading.is_some());
-        for _ in 0..40 {
-            std::thread::sleep(Duration::from_millis(50));
-            harness.step();
-        }
+        // No placement prompt to answer: it starts measuring at once
+        wait(&mut harness, "the first readings", &|a| a.adjust.white.is_some());
+        // A second check, so the loop is seen to go round
+        wait(&mut harness, "the next check", &|a| a.adjust.checking);
+        wait(&mut harness, "its readings", &|a| !a.adjust.checking);
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tmp");
         harness.render().unwrap().save(dir.join("page-adjusting.png")).unwrap();
-        println!("{:?}\n{:?}", harness.state().adjust.target, harness.state().adjust.reading);
+        println!("{:?}", harness.state().adjust);
         harness.get_by_label("Done").click();
-        wait(&mut harness, "the menu again", &|a| a.adjust.menu);
-        harness.get_by_label("Finish").click();
         super::hardware_tests::run_until_idle(&mut harness, Duration::from_secs(60));
         assert_eq!(harness.state().status, None, "log:\n{}", harness.state().log.join("\n"));
     }
@@ -3806,6 +3840,30 @@ mod page_pictures {
                 }
                 harness.run_steps(2);
             }
+            if name == "targets-adjusting" {
+                let ctx = harness.ctx.clone();
+                // Stands in for dispcal, with a check's readings
+                let args = vec!["30".to_string()];
+                let app = harness.state_mut();
+                app.settings.targets.set_brightness = true;
+                app.settings.targets.brightness = 245.0;
+                app.start_job(&ctx, JobKind::Adjust, std::path::Path::new("/usr/bin"), "sleep", &args);
+                for line in [
+                    "Press 1 .. 7",
+                    "Doing check measurements",
+                    "Black = XYZ 0.2701 0.2860 0.3471",
+                    "Grey  = XYZ 51.501 54.212 60.914",
+                    "White = XYZ 230.92 241.94 268.56",
+                    "  Target 50% Level  = 53.413, Current = 54.212 (Aprox. Gamma 2.14), error =  0.3%",
+                    "  Target white = x 0.3127, y 0.3290, Current = x 0.3104, y 0.3252, error =  1.62 DE",
+                    "Press 1 .. 7",
+                    "Doing check measurements",
+                ] {
+                    app.adjust.line(line);
+                }
+                app.placing = false;
+                harness.run_steps(3);
+            }
             if name == "run-naming" {
                 // Measured, waiting for a name. Nothing is written: the
                 // base is never renamed or discarded here.
@@ -3924,6 +3982,7 @@ mod page_pictures {
         shoot(Step::Run, 640.0, false, "run-reference");
         shoot(Step::Run, 640.0, false, "run-reference-none");
         shoot(Step::Targets, 640.0, false, "targets-reference");
+        shoot(Step::Targets, 1100.0, false, "targets-adjusting");
         shoot(Step::Preferences, 640.0, false, "preferences");
         shoot(Step::About, 640.0, false, "about");
         shoot(Step::Verify, 640.0, false, "verify-status");

@@ -111,8 +111,9 @@
   choice).
   Its state (`Prefs`) lives while the page is open; changes apply at
   once.
-- `src/adjust.rs`: reading dispcal's interactive adjustment (menu, mode,
-  target and live readings).
+- `src/adjust.rs`: reading dispcal's interactive adjustment (its repeated
+  checks of black, 50% gray and white), and the color deviation from the
+  target white (CCT, CIEDE2000).
 - `src/charts.rs`: line, outline, point and bar charts from one description,
   drawn with egui or written as SVG; the CIE 1931 spectral locus.
 - `src/report.rs`: the display report's patch set, `.ti3` reading and the
@@ -615,26 +616,42 @@ another distribution.
 ## Adjusting the display's controls
 
 Parameters has an Adjust… button (Display controls). It runs `dispcal -v -d D
--c C [-y|-X] [-t K] [-b B] work/adjust` without `-m`, a job of its own
-(`JobKind::Adjust`), and leaves with Exit (8), so nothing is written and
-calibrating stays the Measure step's. After placing the instrument, dispcal
-shows a menu ("Press 1 .. 7"); `adjust::State` follows it from the output
-lines, and the page offers White point (2), White level (3), Black level
-(1) and Black point (4) as buttons, and Finish (8). In a mode, dispcal
-prints an instruction line and a target ("Target Br ..., x ..., y ...", or
-"Initial ..." when native), then rewrites "Current ..." in place about once
-a second until space. Those readings end only with the next "\r", so the
-reader passes the unterminated text on as `Event::Live` and drops it, which
-also keeps them out of the log. The panel shows the level, chromaticity
-with arrows, ΔE (coloured), and which way to turn red, green and blue, the
-one to turn first (dispcal's doubled sign) underlined; Done sends space.
-The Display controls row (label and Adjust…) sits under the Display line,
-above the targets, and the placement prompt, panel and Cancel appear right
-under it, so they stay in view; the page scrolls, and the panel scrolls
-itself into view when it changes between the menu and an adjustment. With
-the panel at the foot of the page, the placement prompt's Measure button
-was scrolled off at the default window height, where egui ignores clicks,
-and dispcal waited at its prompt. The targets are disabled while it runs.
+-c C [-y|-X] [-t K|-w x,y] [-B b -k 1] [-b B] work/adjust` without `-m`, a
+job of its own (`JobKind::Adjust`), and leaves with Exit (8), so nothing is
+written and calibrating stays the Measure step's. After placing the
+instrument, dispcal shows its menu ("Press 1 .. 7"), and `poll_job()`
+answers with Check all (5) each time it returns, so black, 50% gray and
+white are read over and over with the display uncalibrated. `adjust::State`
+takes from each check (with `-v`) the three XYZ readings ("Black = XYZ",
+"Grey  = XYZ", "White = XYZ"), the 50% target ("Target 50% Level", which
+dispcal works out from the black and white just measured through the tone
+curve calibration aims for, so it moves as they're adjusted) and the target
+white ("Target white = x, y"; with a native white there's none and the
+display's own white is used). dispcal reads the three as one batch, so they
+update together; each line is taken as it arrives. Done sets
+`State::stopping`, and Exit is sent at the next menu: a key pressed during
+a reading would interrupt it.
+
+The panel (`adjust_panel()`, `adjust_bar()`) shows the target white's CCT
+and x,y, then a vertical bar each for black, 50% gray and white. The line
+across a bar's middle is its goal (the black point and white brightness
+targets, dispcal's 50% target); the fill is the reading on a log scale from
+half the goal at the bottom to double at the top, green within 2%
+(`BAR_CLOSE`), yellow within 5% (`BAR_NEAR`), red beyond. Black or white set
+to the device's own (device black, native brightness) has no goal, so its
+bar is greyed and unfilled. Under each bar: the reading, its goal, the
+reading's CCT and its difference from the target's, and CIEDE2000 from the
+target white at the same luminance (each made Y = 1, Lab relative to the
+target, as dispcal does; `adjust::de2000()`, checked against Sharma, Wu and
+Dalal's test data), green to 1, yellow to 3. These show for greyed bars too.
+The Display controls row sits below the targets and the quality note; the
+placement prompt, panel and Cancel appear under it, and the prompt and the
+panel scroll themselves into view once, since egui ignores clicks on
+anything scrolled off. The targets are disabled while it runs.
+
+dispcal's single-control adjustments (menu 1-4) rewrite a reading in place,
+ended only by the next "\r"; DisplayCraft no longer uses them, but the
+reader drops such text rather than let it collect.
 
 A `Job` dropped while its tool runs is cancelled (SIGTERM). Before that, a
 test that panicked mid-adjustment closed dispcal's input, and dispcal

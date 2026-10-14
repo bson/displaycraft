@@ -1,194 +1,75 @@
 //! dispcal's interactive adjustment of the display's own controls, read
-//! from its output. DisplayCraft runs it on its own from the Settings page
-//! and leaves with Exit (8), so calibrating stays a separate step.
+//! from its output. DisplayCraft runs it on its own from the Parameters
+//! page and leaves with Exit (8), so calibrating stays a separate step.
 //!
-//! Without `-m`, dispcal shows a menu ("Press 1 .. 7") after the instrument
-//! is placed. Choosing an adjustment prints an instruction line and a target
-//! (or the starting value when the target is native), then rewrites a
-//! "Current ..." reading in place about once a second until space is
-//! pressed, when the menu returns. For example:
+//! Without `-m`, dispcal shows a menu ("Press 1 .. 7") after the
+//! instrument is placed. DisplayCraft answers with Check all (5) each time
+//! the menu returns, so black, 50% gray and white are read over and over,
+//! with the display uncalibrated. With `-v` each check prints:
 //!
 //! ```text
-//! Adjust R,G & B gain to get target x,y. Press space when done.
-//!    Target Br 185.77, x 0.3325 , y 0.3476
-//! / Current Br 117.34, x 0.3126+, y 0.3427+  DE 10.2  R++ G-  B-
+//! Doing check measurements
+//! Black = XYZ 0.2701 0.2860 0.3471
+//! Grey  = XYZ 52.701 55.672 60.214
+//! White = XYZ 232.92 244.94 263.56
+//! 1%    = XYZ  2.457  2.588  2.791
+//!   Target Brightness = 245.000, Current = 244.949, error = -0.0%
+//!   Target 50% Level  = 55.413, Current = 55.672 (Aprox. Gamma 2.14), error =  0.1%
+//!   Target white = x 0.3145, y 0.3299, Current = x 0.3145, y 0.3299, error =  0.12 DE
 //! ```
 //!
-//! A '+' or '-' after a value says which way it must move; after a channel,
-//! which way to turn its gain or offset, doubled for the one that matters
-//! most.
+//! dispcal reads black, gray and white as one batch, so all three arrive
+//! together. The 50% target comes from the black and white just measured,
+//! through the tone curve calibration will aim for, so it moves as they're
+//! adjusted. With a native white there's no "Target white", only "Current
+//! white", and the target is the display's own white.
 
-/// The adjustments offered, with dispcal's menu key
+/// The three points read
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Mode {
-    WhitePoint,
-    WhiteLevel,
-    BlackLevel,
-    BlackPoint,
+pub enum Point {
+    Black,
+    Mid,
+    White,
 }
 
-impl Mode {
-    pub const ALL: [Mode; 4] = [Mode::WhitePoint, Mode::WhiteLevel, Mode::BlackLevel, Mode::BlackPoint];
-
-    pub fn key(self) -> char {
-        match self {
-            Mode::BlackLevel => '1',
-            Mode::WhitePoint => '2',
-            Mode::WhiteLevel => '3',
-            Mode::BlackPoint => '4',
-        }
-    }
+impl Point {
+    pub const ALL: [Point; 3] = [Point::Black, Point::Mid, Point::White];
 
     pub fn label(self) -> &'static str {
         match self {
-            Mode::WhitePoint => "White point",
-            Mode::WhiteLevel => "White level",
-            Mode::BlackLevel => "Black level",
-            Mode::BlackPoint => "Black point",
-        }
-    }
-
-    /// What to turn, in the display's own menus
-    pub fn controls(self) -> &'static str {
-        match self {
-            Mode::WhitePoint => "the red, green and blue gain (or color temperature) controls",
-            Mode::WhiteLevel => "the brightness (backlight) control",
-            Mode::BlackLevel => "the brightness (offset) control, on displays that have one for black",
-            Mode::BlackPoint => "the red, green and blue offset controls",
-        }
-    }
-
-    /// The instruction line that starts this mode
-    fn from_instruction(line: &str) -> Option<Mode> {
-        if !line.starts_with("Adjust ") {
-            return None;
-        }
-        Some(if line.contains("R,G & B gain") {
-            Mode::WhitePoint
-        } else if line.contains("R,G & B offsets") {
-            Mode::BlackPoint
-        } else if line.contains("Contrast or LCD Brightness") {
-            Mode::WhiteLevel
-        } else if line.contains("CRT brightness") {
-            Mode::BlackLevel
-        } else {
-            return None;
-        })
-    }
-}
-
-/// Which way something must move
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Dir {
-    Up,
-    Down,
-    Hold,
-}
-
-impl Dir {
-    fn from(c: char) -> Dir {
-        match c {
-            '+' => Dir::Up,
-            '-' => Dir::Down,
-            _ => Dir::Hold,
+            Point::Black => "Black",
+            Point::Mid => "50% gray",
+            Point::White => "White",
         }
     }
 }
 
-/// One live reading
-#[derive(Clone, Debug, PartialEq)]
-pub struct Reading {
-    /// Luminance, cd/m²
-    pub level: f64,
-    /// Chromaticity and which way each must move (color modes only)
-    pub xy: Option<((f64, Dir), (f64, Dir))>,
-    /// CIEDE2000 from the target (color modes only)
-    pub de: Option<f64>,
-    /// Red, green and blue: which way to turn each, and whether it's the
-    /// one to turn first (color modes only)
-    pub rgb: Option<[(Dir, bool); 3]>,
-    /// Which way the level must move (level modes only)
-    pub level_dir: Option<Dir>,
-}
-
-/// Parse "/ Current Br 117.34, x 0.3126+, y 0.3427+  DE 10.2  R++ G-  B- "
-/// or "\ Current 117.34  +"
-pub fn parse_reading(text: &str) -> Option<Reading> {
-    let rest = text.trim_start_matches(['/', '\\', ' ']).strip_prefix("Current ")?;
-    let words: Vec<&str> = rest.split_whitespace().collect();
-    if words.first() != Some(&"Br") {
-        // A level: "117.34" then an optional direction
-        let level = words.first()?.parse().ok()?;
-        let level_dir = words.get(1).and_then(|w| w.chars().next()).map(Dir::from).or(Some(Dir::Hold));
-        return Some(Reading { level, xy: None, de: None, rgb: None, level_dir });
-    }
-    let level = words.get(1)?.trim_end_matches(',').parse().ok()?;
-    // "x" "0.3126+," and "y" "0.3427+"
-    let coord = |name: &str| -> Option<(f64, Dir)> {
-        let i = words.iter().position(|w| *w == name)?;
-        let w = words.get(i + 1)?.trim_end_matches(',');
-        let (num, dir) = match w.chars().last()? {
-            c @ ('+' | '-' | '=') => (&w[..w.len() - 1], Dir::from(c)),
-            _ => (w, Dir::Hold),
-        };
-        Some((num.parse().ok()?, dir))
-    };
-    let xy = coord("x").zip(coord("y"));
-    // "DE 10.2", or "DE 2K  0.4" when the target is native
-    let de = words.iter().position(|w| *w == "DE").and_then(|i| {
-        let next = if words.get(i + 1) == Some(&"2K") { i + 2 } else { i + 1 };
-        words.get(next)?.parse().ok()
-    });
-    let channel = |c: char| -> Option<(Dir, bool)> {
-        let w = words.iter().find(|w| w.starts_with(c) && w.len() >= 2 && w.len() <= 3)?;
-        let mut chars = w.chars().skip(1);
-        let dir = Dir::from(chars.next()?);
-        Some((dir, chars.next().is_some_and(|c| c == '+' || c == '-')))
-    };
-    let rgb = match (channel('R'), channel('G'), channel('B')) {
-        (Some(r), Some(g), Some(b)) => Some([r, g, b]),
-        _ => None,
-    };
-    Some(Reading { level, xy, de, rgb, level_dir: None })
-}
-
-/// dispcal's target line for showing: "Target Br 185.77, x 0.3325 , y
-/// 0.3476" -> "Target: 185.8 cd/m², x 0.3325, y 0.3476"; "Target 0.25" ->
-/// "Target: 0.25 cd/m²"; "Initial 117.34" -> "Started at 117.3 cd/m²".
-/// Anything else is returned as it is.
-pub fn target_text(line: &str) -> String {
-    let (lead, rest) = if let Some(r) = line.strip_prefix("Target") {
-        ("Target:", r)
-    } else if let Some(r) = line.strip_prefix("Initial") {
-        ("Started at", r)
-    } else {
-        return line.to_string();
-    };
-    let words: Vec<&str> = rest.split([' ', ',']).filter(|w| !w.is_empty()).collect();
-    let num = |i: usize| words.get(i).and_then(|w| w.parse::<f64>().ok());
-    let level = |v: f64| if v < 10.0 { format!("{v:.2} cd/m²") } else { format!("{v:.1} cd/m²") };
-    match words.first() {
-        Some(&"Br") => match (num(1), num(3), num(5)) {
-            (Some(b), Some(x), Some(y)) => format!("{lead} {}, x {x:.4}, y {y:.4}", level(b)),
-            _ => line.to_string(),
-        },
-        _ => match num(0) {
-            Some(v) => format!("{lead} {}", level(v)),
-            None => line.to_string(),
-        },
-    }
-}
-
-/// What dispcal is doing in its adjustment stage
+/// What dispcal is doing in its adjustment stage, and the latest readings
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct State {
-    /// Waiting at the menu
+    /// The menu has been shown: past the placement prompt, adjusting
+    pub started: bool,
+    /// Waiting at the menu, for the next check (or Exit)
     pub menu: bool,
-    pub mode: Option<Mode>,
-    /// "Target Br 185.77, x 0.3325 , y 0.3476" or, for a native target,
-    /// "Initial 117.34", without the leading spaces
-    pub target: Option<String>,
-    pub reading: Option<Reading>,
+    /// A check is under way
+    pub checking: bool,
+    /// Done was asked for: Exit at the next menu, since a key pressed while
+    /// reading would interrupt the reading
+    pub stopping: bool,
+    /// XYZ in cd/m², kept from one check to the next
+    pub black: Option<[f64; 3]>,
+    pub mid: Option<[f64; 3]>,
+    pub white: Option<[f64; 3]>,
+    /// The 50% level to aim for, from the last black and white, cd/m²
+    pub target_mid: Option<f64>,
+    /// The white point to aim for; None for the display's own (native)
+    pub target_xy: Option<(f64, f64)>,
+}
+
+/// "0.2701 0.2860 0.3471" -> the three numbers
+fn xyz(rest: &str) -> Option<[f64; 3]> {
+    let n: Vec<f64> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+    (n.len() == 3).then(|| [n[0], n[1], n[2]])
 }
 
 impl State {
@@ -196,31 +77,130 @@ impl State {
     pub fn line(&mut self, line: &str) {
         let line = line.trim();
         if line.starts_with("Press 1 .. 7") {
-            *self = State { menu: true, ..State::default() };
-        } else if let Some(mode) = Mode::from_instruction(line) {
-            *self = State { mode: Some(mode), ..State::default() };
-        } else if self.mode.is_some() && (line.starts_with("Target") || line.starts_with("Initial")) {
-            self.target = Some(line.to_string());
-        } else if line.starts_with("Target white =") || line.starts_with("Setting up") {
-            // Before the menu, or calibrating after it
-        } else if self.menu && !line.starts_with(char::is_numeric) {
-            // Anything but the menu's own entries means it has moved on
+            self.started = true;
+            self.menu = true;
+            self.checking = false;
+        } else if line.starts_with("Doing check measurements") {
             self.menu = false;
-        }
-    }
-
-    /// Take in a live reading
-    pub fn live(&mut self, text: &str) {
-        if self.mode.is_some() {
-            if let Some(r) = parse_reading(text) {
-                self.reading = Some(r);
+            self.checking = true;
+        } else if let Some(rest) = line.strip_prefix("Black = XYZ") {
+            self.black = xyz(rest).or(self.black);
+        } else if let Some(rest) = line.strip_prefix("Grey  = XYZ").or_else(|| line.strip_prefix("Grey = XYZ")) {
+            self.mid = xyz(rest).or(self.mid);
+        } else if let Some(rest) = line.strip_prefix("White = XYZ") {
+            self.white = xyz(rest).or(self.white);
+        } else if let Some(rest) = line.strip_prefix("Target 50% Level") {
+            // "= 55.413, Current = 55.672 (Aprox. Gamma 2.14), error =  0.1%"
+            let value = rest.trim_start_matches([' ', '=']).split(',').next().and_then(|v| v.trim().parse().ok());
+            self.target_mid = value.or(self.target_mid);
+        } else if let Some(rest) = line.strip_prefix("Target white = x") {
+            // "0.3145, y 0.3299, Current = ..."
+            let mut parts = rest.split(',');
+            let x = parts.next().and_then(|v| v.trim().parse().ok());
+            let y = parts.next().and_then(|v| v.trim().strip_prefix('y')?.trim().parse().ok());
+            if let (Some(x), Some(y)) = (x, y) {
+                self.target_xy = Some((x, y));
             }
         }
     }
 
+    /// Whether dispcal is past the placement prompt and in its adjustment
+    /// stage
     pub fn active(&self) -> bool {
-        self.menu || self.mode.is_some()
+        self.started
     }
+
+    pub fn reading(&self, p: Point) -> Option<[f64; 3]> {
+        match p {
+            Point::Black => self.black,
+            Point::Mid => self.mid,
+            Point::White => self.white,
+        }
+    }
+
+    /// The white point deviations are measured from: the target, or for a
+    /// native one the display's own white
+    pub fn reference_xy(&self) -> Option<(f64, f64)> {
+        self.target_xy.or_else(|| self.white.map(xy))
+    }
+}
+
+pub fn xy(c: [f64; 3]) -> (f64, f64) {
+    let s = c[0] + c[1] + c[2];
+    if s <= 0.0 { (0.0, 0.0) } else { (c[0] / s, c[1] / s) }
+}
+
+/// How far a reading's color is from the target white
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Deviation {
+    /// CIEDE2000 between the two at the same luminance, as dispcal works it
+    /// out: each made Y = 1, Lab relative to the target
+    pub de: f64,
+    /// The reading's correlated color temperature, K
+    pub cct: f64,
+    /// It less the target's, K
+    pub cct_diff: f64,
+}
+
+pub fn deviation(reading: [f64; 3], target: (f64, f64)) -> Option<Deviation> {
+    if reading[1] <= 0.0 || target.1 <= 0.0 {
+        return None;
+    }
+    let white = [target.0 / target.1, 1.0, (1.0 - target.0 - target.1) / target.1];
+    let c = reading.map(|v| v / reading[1]);
+    let de = de2000(lab(white, white), lab(c, white));
+    let cct = crate::report::cct(xy(reading));
+    Some(Deviation { de, cct, cct_diff: cct - crate::report::cct(target) })
+}
+
+/// CIE Lab of `c` relative to `white`, both XYZ
+fn lab(c: [f64; 3], white: [f64; 3]) -> [f64; 3] {
+    let f = |t: f64| if t > 216.0 / 24389.0 { t.cbrt() } else { (24389.0 / 27.0 * t + 16.0) / 116.0 };
+    let [fx, fy, fz] = [0, 1, 2].map(|i| f(c[i] / white[i]));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// CIEDE2000, as formulated by Sharma, Wu and Dalal
+pub fn de2000(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let rad = f64::to_radians;
+    let c7 = |c: f64| (c.powi(7) / (c.powi(7) + 25f64.powi(7))).sqrt();
+    let cm = (a[1].hypot(a[2]) + b[1].hypot(b[2])) / 2.0;
+    let g = 0.5 * (1.0 - c7(cm));
+    let (a1, a2) = (a[1] * (1.0 + g), b[1] * (1.0 + g));
+    let (c1, c2) = (a1.hypot(a[2]), a2.hypot(b[2]));
+    let hue = |a: f64, b: f64| if a == 0.0 && b == 0.0 { 0.0 } else { b.atan2(a).to_degrees().rem_euclid(360.0) };
+    let (h1, h2) = (hue(a1, a[2]), hue(a2, b[2]));
+    let dh = if c1 * c2 == 0.0 {
+        0.0
+    } else if (h2 - h1).abs() <= 180.0 {
+        h2 - h1
+    } else if h2 > h1 {
+        h2 - h1 - 360.0
+    } else {
+        h2 - h1 + 360.0
+    };
+    let dl = b[0] - a[0];
+    let dc = c2 - c1;
+    let dhh = 2.0 * (c1 * c2).sqrt() * rad(dh / 2.0).sin();
+    let lm = (a[0] + b[0]) / 2.0;
+    let cm = (c1 + c2) / 2.0;
+    let hm = if c1 * c2 == 0.0 {
+        h1 + h2
+    } else if (h1 - h2).abs() <= 180.0 {
+        (h1 + h2) / 2.0
+    } else if h1 + h2 < 360.0 {
+        (h1 + h2 + 360.0) / 2.0
+    } else {
+        (h1 + h2 - 360.0) / 2.0
+    };
+    let t = 1.0 - 0.17 * rad(hm - 30.0).cos() + 0.24 * rad(2.0 * hm).cos() + 0.32 * rad(3.0 * hm + 6.0).cos()
+        - 0.20 * rad(4.0 * hm - 63.0).cos();
+    let dtheta = 30.0 * (-((hm - 275.0) / 25.0).powi(2)).exp();
+    let sl = 1.0 + 0.015 * (lm - 50.0).powi(2) / (20.0 + (lm - 50.0).powi(2)).sqrt();
+    let sc = 1.0 + 0.045 * cm;
+    let sh = 1.0 + 0.015 * cm * t;
+    let rt = -rad(2.0 * dtheta).sin() * 2.0 * c7(cm);
+    ((dl / sl).powi(2) + (dc / sc).powi(2) + (dhh / sh).powi(2) + rt * (dc / sc) * (dhh / sh)).sqrt()
 }
 
 #[cfg(test)]
@@ -228,49 +208,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_white_point_and_level() {
-        let r = parse_reading("/ Current Br 117.34, x 0.3126+, y 0.3427-  DE 10.2  R++ G-  B=  ").unwrap();
-        assert_eq!(r.level, 117.34);
-        assert_eq!(r.xy, Some(((0.3126, Dir::Up), (0.3427, Dir::Down))));
-        assert_eq!(r.de, Some(10.2));
-        assert_eq!(r.rgb, Some([(Dir::Up, true), (Dir::Down, false), (Dir::Hold, false)]));
-        let native = parse_reading("\\ Current Br 120.00, x 0.3127=, y 0.3290+  CDT 6504K DE 2K  0.4  R+  G=  B- ").unwrap();
-        assert_eq!(native.de, Some(0.4));
-        let level = parse_reading("\\ Current 117.15   ").unwrap();
-        assert_eq!((level.level, level.level_dir, level.xy), (117.15, Some(Dir::Hold), None));
-        let level = parse_reading("/ Current 95.20  +").unwrap();
-        assert_eq!(level.level_dir, Some(Dir::Up));
-        assert!(parse_reading("Target Br 185.77").is_none());
+    fn de2000_matches_sharmas_test_data() {
+        // Pairs 1, 7, 17 and 25 of Sharma, Wu and Dalal's table
+        let pairs = [
+            ([50.0, 2.6772, -79.7751], [50.0, 0.0, -82.7485], 2.0425),
+            ([50.0, 0.0, 0.0], [50.0, -1.0, 2.0], 2.3669),
+            ([50.0, 2.5, 0.0], [56.0, -27.0, -3.0], 31.9030),
+            ([60.2574, -34.0099, 36.2677], [60.4626, -34.1751, 39.4387], 1.2644),
+        ];
+        for (a, b, want) in pairs {
+            assert!((de2000(a, b) - want).abs() < 1e-4, "{a:?} {b:?}: {} not {want}", de2000(a, b));
+            assert!((de2000(b, a) - want).abs() < 1e-4);
+        }
     }
 
     #[test]
-    fn target_lines() {
-        assert_eq!(target_text("Target Br 185.77, x 0.3325 , y 0.3476"), "Target: 185.8 cd/m², x 0.3325, y 0.3476");
-        assert_eq!(target_text("Target 0.25"), "Target: 0.25 cd/m²");
-        assert_eq!(target_text("Initial 117.34"), "Started at 117.3 cd/m²");
-        assert_eq!(target_text("Initial Br 120.00, x 0.3127 , y 0.3290 , CDT 6504K DE 2K  0.4"), "Started at 120.0 cd/m², x 0.3127, y 0.3290");
+    fn deviation_from_the_target_white() {
+        let d65 = (0.3127, 0.3290);
+        let on = deviation([95.05, 100.0, 108.9], d65).unwrap();
+        assert!(on.de < 0.05 && on.cct_diff.abs() < 15.0, "{on:?}");
+        // A warmer gray, at a tenth the luminance
+        let warm = deviation([9.7, 10.0, 9.6], d65).unwrap();
+        assert!(warm.de > 3.0 && warm.cct_diff < -300.0, "{warm:?}");
     }
 
     #[test]
-    fn follows_the_menu() {
+    fn follows_the_checks() {
         let mut s = State::default();
-        s.line("Target white = 5500.000000 degrees kelvin Daylight spectrum");
+        s.line("Target white = 6500.000000 degrees kelvin Daylight spectrum");
         assert!(!s.active());
         s.line("Press 1 .. 7");
-        s.line("1) Black level (CRT: Offset/Brightness)");
-        s.line("8) Exit");
-        assert!(s.menu);
-        s.line("Adjust R,G & B gain to get target x,y. Press space when done.");
-        s.line("   Target Br 185.77, x 0.3325 , y 0.3476 ");
-        assert_eq!((s.mode, s.target.as_deref()), (Some(Mode::WhitePoint), Some("Target Br 185.77, x 0.3325 , y 0.3476")));
-        s.live("/ Current Br 117.34, x 0.3126+, y 0.3427+  DE 10.2  R++ G-  B-  ");
-        assert_eq!(s.reading.as_ref().unwrap().level, 117.34);
+        assert!(s.menu && s.active());
+        s.line("Doing check measurements");
+        assert!(s.checking && !s.menu);
+        s.line("Black = XYZ 0.2701 0.2860 0.3471");
+        s.line("Grey  = XYZ 52.701 55.672 60.214");
+        s.line("White = XYZ 232.92 244.94 263.56");
+        s.line("1%    = XYZ  2.457  2.588  2.791");
+        s.line("  Target Brightness = 245.000, Current = 244.949, error = -0.0%");
+        s.line("  Target 50% Level  = 55.413, Current = 55.672 (Aprox. Gamma 2.14), error =  0.1%");
+        s.line("  Target white = x 0.3145, y 0.3299, Current = x 0.3145, y 0.3299, error =  0.12 DE");
+        s.line("  Target black = x 0.3145, y 0.3299, Current = x 0.3077, y 0.3166, error =  4.20 DE");
+        assert_eq!(s.black, Some([0.2701, 0.2860, 0.3471]));
+        assert_eq!(s.mid.map(|c| c[1]), Some(55.672));
+        assert_eq!(s.white.map(|c| c[1]), Some(244.94));
+        assert_eq!((s.target_mid, s.target_xy), (Some(55.413), Some((0.3145, 0.3299))));
         s.line("Press 1 .. 7");
-        assert!(s.menu && s.mode.is_none() && s.reading.is_none());
-        s.line("Adjust CRT Contrast or LCD Brightness to desired level. Press space when done.");
-        assert_eq!(s.mode, Some(Mode::WhiteLevel));
-        s.line("Press 1 .. 7");
-        s.line("Commencing device calibration");
-        assert!(!s.active());
+        assert!(s.menu && !s.checking);
+        // Readings stay until the next ones arrive
+        s.line("Doing check measurements");
+        assert_eq!(s.white.map(|c| c[1]), Some(244.94));
+    }
+
+    #[test]
+    fn native_white_is_the_displays_own() {
+        let mut s = State::default();
+        s.line("White = XYZ 232.92 244.94 263.56");
+        s.line("  Current white = x 0.3142, y 0.3304, CDT 6400K DE 2K  1.2");
+        assert_eq!(s.target_xy, None);
+        let (x, y) = s.reference_xy().unwrap();
+        assert!((x - 0.31415).abs() < 1e-4 && (y - 0.33036).abs() < 1e-4, "{x} {y}");
     }
 }

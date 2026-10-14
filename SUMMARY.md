@@ -540,7 +540,12 @@ and Inno Setup 7.1.0, installed for the current user (`/CURRENTUSER`).
 Rust's `stable-x86_64-pc-windows-gnu` toolchain comes from the rustup in
 `-RustHome` (or one installed in the cache). The sources are copied with
 robocopy, leaving out `.git` and, for DisplayCraft only, `target`, `tmp`,
-`dist` and the submodule (ArgyllCMS has a `target` source folder);
+`dist` and the submodule (ArgyllCMS has a `target` source folder), to
+`argyllcms` and `displaycraft-src` in the work folder. Not
+`displaycraft`: Windows ignores case, so that would be the `DisplayCraft`
+folder the app is put together in, and the sources would ship in the zip
+and installer (as they did in builds before v0.1.0); the script stops if
+that folder already exists;
 ArgyllCMS builds with the usual `-sBUILTIN_*` options, `MINGW` and a
 relative `DESTDIR`; DisplayCraft with `cargo +stable-x86_64-pc-windows-gnu
 build --release --locked`. The folder has `displaycraft.exe`,

@@ -1,49 +1,98 @@
 # DisplayCraft
 
-Display calibration and profiling for Linux desktops, written in Rust with the
-look of the ArtCraft applications (egui with the ArtCraft `craft-ui` library).
-It walks through picking a display and instrument (with a colorimeter
-correction if wanted), setting calibration targets, then calibrating, making
-an ICC profile (shaper+matrix or LUT, from a set of measured patches) and
-installing it, and verifying how accurate a profile is.
-Before calibrating, a monitor's own white point, brightness and black level
-controls can be adjusted with live readings. Verification gives a printable
-HTML report with charts, and results can be exported as CSV. Profiles can be
-viewed as graphs: calibration curves, tonal response and gamut. A display report measures
-brightness, contrast, gamma, white point and gamut coverage, uncalibrated
-or as calibrated, and a profiles page shows which profile KWin is using
-and switches, removes or deletes them.
+Display calibration and profiling for Linux, macOS and Windows, written in
+Rust with the look of the ArtCraft applications (egui with the ArtCraft
+`craft-ui` library).
+
+## What it does
+
+DisplayCraft walks through calibrating a display with a colorimeter or
+spectrophotometer: pick the display, then the instrument (with a
+colorimeter correction if wanted), set the targets (white point,
+brightness, gamma), and measure.
+
+![Choosing a display](screenshots/display.png)
+
+Measuring calibrates the display, makes an ICC profile (shaper+matrix or
+LUT) from a set of measured patches, and installs it. Before calibrating,
+a monitor's own white point, brightness and black level controls can be
+adjusted with live readings.
+
+![Calibrating](screenshots/measure.png)
+
+Verification measures how accurately a profile describes the display, and
+gives a printable HTML report with charts; results can be exported as CSV.
+
+![Verifying a profile](screenshots/verify.png)
+
+The profiles page shows which profile a display uses, and switches,
+removes or deletes them. Profiles can be viewed as graphs: calibration
+curves, tonal response and gamut. A display report measures brightness,
+contrast, gamma, white point and gamut coverage, uncalibrated or as
+calibrated.
+
+![The profiles for a display](screenshots/profiles.png)
+
+## How it works
 
 The measuring is done by ArgyllCMS, which DisplayCraft runs as separate
-programs. On KDE Plasma under Wayland it needs the Wayland build of ArgyllCMS,
-which shows test patches and loads calibrations through KWin. That build
-also keeps ArgyllCMS's X11 support, used on X11 sessions and, through
-XWayland, on other Wayland desktops.
+programs, and which comes with it. It's a modified ArgyllCMS: on KDE Plasma
+under Wayland it shows test patches and loads calibrations through KWin,
+while keeping ArgyllCMS's X11 support, used on X11 sessions and, through
+XWayland, on other Wayland desktops. On macOS and Windows it's ArgyllCMS's
+own support for those systems.
 
 Its About page links to the source of DisplayCraft and of the modified
 ArgyllCMS it comes with.
 
 DisplayCraft is not affiliated with ArtCraft.
 
+## Download
+
+The [releases](https://github.com/bson/displaycraft/releases) have:
+
+- Linux: an AppImage, for KDE Plasma 6.4 or later, or a desktop with an X
+  server or XWayland. It needs `chmod +x` before it runs.
+- macOS: a disk image with `DisplayCraft.app`, for Apple Silicon Macs.
+- Windows: an installer, which installs for the current user without
+  administrator rights, and a portable zip, for 64-bit Windows.
+
+None are signed. macOS asks before the first launch: allow it in System
+Settings > Privacy & Security, or run `xattr -dr com.apple.quarantine
+DisplayCraft.app`. On Windows, SmartScreen warns before the first run.
+
 ## Requirements
 
-- KDE Plasma on Wayland, which is what DisplayCraft is developed and tested
-  on. X11 sessions (Plasma, GNOME) and other Wayland desktops should work
-  through ArgyllCMS's X11 support, but haven't been tried yet; which
-  profile is in use comes from KDE. ArgyllCMS checks the
-  platform when DisplayCraft starts, and DisplayCraft won't run anywhere it
-  reports the platform as unsupported.
-- ArgyllCMS. The AppImage comes with its own, which works with KDE Plasma on
-  Wayland or with X11. It finds out which of the two this session calls for
-  when DisplayCraft starts; Preferences shows what it found, and can set it
-  to one of them, or to another ArgyllCMS installed elsewhere. Run from
-  source, the bundled ArgyllCMS is the one in `DISPLAYCRAFT_ARGYLL_BIN` or
-  `/opt/argyll-kde-wayland/bin`.
-- A supported measuring instrument, with permission to access it (the
-  distribution's ArgyllCMS package installs the udev rule for this).
+- One of:
+  - KDE Plasma on Wayland. X11 sessions (Plasma, GNOME) and other Wayland
+    desktops work through ArgyllCMS's X11 support; which profile is in use
+    comes from KDE. ArgyllCMS checks the platform when DisplayCraft starts,
+    and DisplayCraft won't run anywhere it reports the platform as
+    unsupported.
+  - macOS.
+  - Windows, 64-bit.
+- A supported measuring instrument. On Linux the user needs permission to
+  access it through a udev rule; where the system has none, DisplayCraft
+  offers to install ArgyllCMS's, asking for an administrator password.
 - Rust 1.95 or later to build.
 
+On Linux, Preferences shows which of ArgyllCMS's display systems (KDE
+Plasma on Wayland, or X11) DisplayCraft found this session calls for, and
+can set it to one of them, or to another ArgyllCMS installed elsewhere.
+
+## Where things are kept
+
+Calibrations and profiles, verification reports (in `verify/`), display
+reports (in `reports/`) and preferences (`settings.toml`) are kept in:
+
+- Linux: `~/.local/share/displaycraft/`, with preferences in
+  `~/.config/displaycraft/`
+- macOS: `~/Library/Application Support/DisplayCraft/`
+- Windows: `%APPDATA%\DisplayCraft\`
+
 ## Building and running
+
+On Linux:
 
     cargo run --release
 
@@ -53,51 +102,41 @@ application launcher:
     ./install.sh               # or PREFIX=/usr/local ./install.sh
     ./install.sh --uninstall
 
-Calibrations and profiles are saved in `~/.local/share/displaycraft/`,
-verification reports in its `verify/` folder, display reports in
-`reports/`, and
-preferences in `~/.config/displaycraft/settings.toml`.
+Run from source, DisplayCraft uses the ArgyllCMS in
+`DISPLAYCRAFT_ARGYLL_BIN`, or on Linux `/opt/argyll-kde-wayland/bin`, or on
+macOS the one inside an installed `DisplayCraft.app` (in `/Applications` or
+`~/Applications`).
 
-## AppImage
-
-`packaging/appimage/build.sh` builds a single AppImage containing
-DisplayCraft and the Wayland build of ArgyllCMS, in an Ubuntu 24.04
-container (podman or docker), so it runs on any distribution with KDE
-Plasma 6.4 or later, or with an X server or XWayland. The Wayland ArgyllCMS is the `argyllcms` submodule
-([bson/ArgyllCMS](https://github.com/bson/ArgyllCMS)):
+The modified ArgyllCMS is the `argyllcms` submodule
+([bson/ArgyllCMS](https://github.com/bson/ArgyllCMS)); the packaging
+scripts below build it along with DisplayCraft:
 
     git submodule update --init
-    packaging/appimage/build.sh
 
-The AppImage is written to `dist/`.
+### AppImage
 
-Measuring instruments need a udev rule giving the user access. Where the
-system has none, DisplayCraft offers to install ArgyllCMS's rule, asking
-for an administrator password.
+`packaging/appimage/build.sh` builds a single AppImage containing
+DisplayCraft and ArgyllCMS, in an Ubuntu 24.04 container (podman or
+docker), so it runs on any distribution. It's written to `dist/`.
 
-## macOS
+### macOS
 
-`packaging/macos/make-app.sh` builds `DisplayCraft.app`, with the same
-ArgyllCMS inside, in a disk image in `dist/`, on a Mac with Xcode's command line
-tools and Rust. It builds for the Mac's own processor; GitHub builds for
-Apple Silicon. The app isn't signed with an Apple Developer ID, so macOS
-asks before the first launch: allow it in System Settings > Privacy &
-Security, or run `xattr -dr com.apple.quarantine DisplayCraft.app`. On
-macOS DisplayCraft builds and starts, but measuring hasn't been made to
-work there yet. Run from source (`cargo run --release`), it uses the
-ArgyllCMS inside an installed `DisplayCraft.app`, in `/Applications` or
-`~/Applications`.
+`packaging/macos/make-app.sh` builds `DisplayCraft.app`, with ArgyllCMS
+inside, in a disk image in `dist/`, on a Mac with Xcode's command line
+tools and Rust. It builds for the Mac's own processor.
 
-## Windows
+macOS 27 has a bug that can leave the display black (though on) after a
+program has changed its calibration curves. DisplayCraft and its
+ArgyllCMS work around it. If a display is ever left black anyway, running
+`dispwin -d 1 -L` from `DisplayCraft.app/Contents/Resources/argyll/bin`
+(over SSH, for instance) brings it back.
 
-`packaging\windows\make-app.ps1` builds DisplayCraft with the same
-ArgyllCMS on a Windows machine with rustup, downloading the rest (a
-MinGW-w64 compiler, ArgyllCMS's jam and Inno Setup) into its cache. It
-makes a portable zip and an installer, which installs for the current
-user without administrator rights, with a Start menu entry and an
-uninstaller. Neither is signed, so Windows SmartScreen warns before the
-first run. On Windows DisplayCraft runs and measures, but hasn't been
-tried on real hardware yet.
+### Windows
+
+`packaging\windows\make-app.ps1` builds DisplayCraft with ArgyllCMS on a
+Windows machine with rustup, downloading the rest (a MinGW-w64 compiler,
+ArgyllCMS's jam and Inno Setup) into its cache. It makes the portable zip
+and the installer, in `dist\`.
 
 ## Releases
 
@@ -105,7 +144,7 @@ On GitHub, the Build workflow makes test builds of the AppImage, the macOS
 app and the Windows zip and installer when run from the Actions tab, and
 publishes a release with all of them when a version tag (`v0.1.0`,
 matching `Cargo.toml`) is pushed. Each downloads as it is, without being
-zipped again. A downloaded AppImage needs `chmod +x` before it runs.
+zipped again.
 
 ## License
 

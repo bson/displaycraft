@@ -153,8 +153,10 @@ function Copy-Tree([string]$From, [string]$To, [string[]]$Skip) {
 # Not ArgyllCMS's "target" folder, which is source (targen)
 Copy-Tree $ArgyllSrc "$Work\argyllcms" @('.git')
 # DisplayCraft's build output and scratch folders; the submodule is copied
-# on its own
-Copy-Tree $Src "$Work\displaycraft" @('.git', 'target', 'tmp', 'dist', 'argyllcms')
+# on its own. Not "displaycraft": Windows ignores case in paths, so that
+# would be the DisplayCraft folder the app is put together in below, and
+# the sources would ship in the zip and the installer.
+Copy-Tree $Src "$Work\displaycraft-src" @('.git', 'target', 'tmp', 'dist', 'argyllcms')
 
 # ArgyllCMS, with its own copies of TIFF, JPEG, PNG, zlib and SSL. DESTDIR
 # is relative, as jam can't create a path starting with a drive letter.
@@ -163,13 +165,14 @@ $rc = Invoke-Tool $jam @('-q', '-fJambase', "-j$([Environment]::ProcessorCount)"
 if ($rc -ne 0 -or -not (Test-Path "$Work\argyll\bin\dispcal.exe")) { Get-Content $log -Tail 60; throw "Building ArgyllCMS failed" }
 
 # DisplayCraft
-$rc = Invoke-Tool "$cargoHome\bin\cargo.exe" @('+stable-x86_64-pc-windows-gnu', 'build', '--release', '--locked') "$Work\displaycraft" `
+$rc = Invoke-Tool "$cargoHome\bin\cargo.exe" @('+stable-x86_64-pc-windows-gnu', 'build', '--release', '--locked') "$Work\displaycraft-src" `
     ($rustEnv + @{ CARGO_TARGET_DIR = "$Cache\target" }) $log
 if ($rc -ne 0) { Get-Content $log -Tail 60; throw "Building DisplayCraft failed" }
 
 # The folder: displaycraft.exe, with its ArgyllCMS in argyll\bin
 # (system::Single::bundled_dir) and the corrections beside it in argyll\ref
 $app = "$Work\DisplayCraft"
+if (Test-Path $app) { throw "$app already exists; is it another folder under a different case?" }
 New-Item -ItemType Directory -Force "$app\argyll\bin", "$app\doc" | Out-Null
 Copy-Item "$Cache\target\release\displaycraft.exe", "$Src\assets\displaycraft.ico" $app
 foreach ($p in 'dispcal', 'dispread', 'dispwin', 'targen', 'colprof', 'fakeread', 'colverify', 'spotread', 'ccxxmake', 'oeminst', 'iccdump') {

@@ -33,23 +33,11 @@ calibrated.
 
 ![The profiles for a display](screenshots/profiles.png)
 
-## How it works
-
-The measuring is done by ArgyllCMS, which DisplayCraft runs as separate
-programs, and which comes with it. It's a modified ArgyllCMS: on KDE Plasma
-under Wayland it shows test patches and loads calibrations through KWin,
-while keeping ArgyllCMS's X11 support, used on X11 sessions and, through
-XWayland, on other Wayland desktops. On macOS and Windows it's ArgyllCMS's
-own support for those systems.
-
-Its About page links to the source of DisplayCraft and of the modified
-ArgyllCMS it comes with.
-
-DisplayCraft is not affiliated with ArtCraft.
-
 ## Download
 
-The [releases](https://github.com/bson/displaycraft/releases) have:
+The [releases](https://github.com/bson/displaycraft/releases) are ready to
+run, with ArgyllCMS included; there's nothing to build or install besides
+them. They have:
 
 - Linux: an AppImage, for KDE Plasma 6.4 or later, or a desktop with an X
   server or XWayland. It needs `chmod +x` before it runs.
@@ -60,6 +48,12 @@ The [releases](https://github.com/bson/displaycraft/releases) have:
 None are signed. macOS asks before the first launch: allow it in System
 Settings > Privacy & Security, or run `xattr -dr com.apple.quarantine
 DisplayCraft.app`. On Windows, SmartScreen warns before the first run.
+
+macOS 27 has a bug that can leave the display black (though on) after a
+program has changed its calibration curves. DisplayCraft and its
+ArgyllCMS work around it. If a display is ever left black anyway, running
+`dispwin -d 1 -L` from `DisplayCraft.app/Contents/Resources/argyll/bin`
+(over SSH, for instance) brings it back.
 
 ## Requirements
 
@@ -74,7 +68,6 @@ DisplayCraft.app`. On Windows, SmartScreen warns before the first run.
 - A supported measuring instrument. On Linux the user needs permission to
   access it through a udev rule; where the system has none, DisplayCraft
   offers to install ArgyllCMS's, asking for an administrator password.
-- Rust 1.95 or later to build.
 
 On Linux, Preferences shows which of ArgyllCMS's display systems (KDE
 Plasma on Wayland, or X11) DisplayCraft found this session calls for, and
@@ -90,7 +83,24 @@ reports (in `reports/`) and preferences (`settings.toml`) are kept in:
 - macOS: `~/Library/Application Support/DisplayCraft/`
 - Windows: `%APPDATA%\DisplayCraft\`
 
-## Building and running
+## How it works
+
+The measuring is done by ArgyllCMS, which DisplayCraft runs as separate
+programs, and which comes with it. It's a modified ArgyllCMS: on KDE Plasma
+under Wayland it shows test patches and loads calibrations through KWin,
+while keeping ArgyllCMS's X11 support, used on X11 sessions and, through
+XWayland, on other Wayland desktops. On macOS and Windows it's ArgyllCMS's
+own support for those systems.
+
+Its About page links to the source of DisplayCraft and of the modified
+ArgyllCMS it comes with.
+
+DisplayCraft is not affiliated with ArtCraft.
+
+## Building from source
+
+This isn't needed to use DisplayCraft: the releases above are complete.
+It's for working on DisplayCraft itself, and needs Rust 1.95 or later.
 
 On Linux:
 
@@ -125,12 +135,6 @@ docker), so it runs on any distribution. It's written to `dist/`.
 inside, in a disk image in `dist/`, on a Mac with Xcode's command line
 tools and Rust. It builds for the Mac's own processor.
 
-macOS 27 has a bug that can leave the display black (though on) after a
-program has changed its calibration curves. DisplayCraft and its
-ArgyllCMS work around it. If a display is ever left black anyway, running
-`dispwin -d 1 -L` from `DisplayCraft.app/Contents/Resources/argyll/bin`
-(over SSH, for instance) brings it back.
-
 ### Windows
 
 `packaging\windows\make-app.ps1` builds DisplayCraft with ArgyllCMS on a
@@ -138,7 +142,7 @@ Windows machine with rustup, downloading the rest (a MinGW-w64 compiler,
 ArgyllCMS's jam and Inno Setup) into its cache. It makes the portable zip
 and the installer, in `dist\`.
 
-## Releases
+### Releases
 
 On GitHub, the Build workflow makes test builds of the AppImage, the macOS
 app and the Windows zip and installer when run from the Actions tab, and

@@ -3660,6 +3660,11 @@ mod tests {
     fn display_names() {
         assert_eq!(display_name("Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, width 2560, height 1600"), "eDP-1 (Sharp Corporation eDP-1)");
         assert_eq!(display_name("Built-in Display, at 0, 0, width 2624, height 1696 (Primary Display)"), "Built-in Display");
+        // A maker's name with a comma of its own
+        let gigabyte = "Monitor 1, Output DP-1 (GIGA-BYTE TECHNOLOGY CO., LTD. M27U) at 3840, 0, width 3840, height 2160";
+        assert_eq!(display_name(gigabyte), "DP-1 (GIGA-BYTE TECHNOLOGY CO., LTD. M27U)");
+        assert_eq!(output_name(gigabyte), "DP-1");
+        assert_eq!(reference::model(&display_name(gigabyte)).as_deref(), Some("GIGA-BYTE TECHNOLOGY CO., LTD. M27U"));
     }
 
     #[test]

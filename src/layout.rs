@@ -109,9 +109,13 @@ pub fn parse(json: &str) -> Option<Vec<Output>> {
 /// "Monitor 1, Output eDP-1 (Sharp Corporation eDP-1) at 0, 0, ..." ->
 /// "eDP-1 (Sharp Corporation eDP-1)". On macOS there's no "Output", and a
 /// comma before "at": "Built-in Display, at 0, 0, ..." -> "Built-in Display".
+/// Makers' names can have commas of their own ("GIGA-BYTE TECHNOLOGY CO.,
+/// LTD. M27U"), so the name runs to the last " at ", where the position
+/// starts, rather than to a comma.
 pub fn display_name(description: &str) -> String {
-    let text = description.split(", ").find_map(|p| p.strip_prefix("Output ")).unwrap_or(description);
-    text.split(" at ").next().unwrap_or(text).trim_end_matches([',', ' ']).to_string()
+    let text = description.split_once("Output ").map_or(description, |(_, rest)| rest);
+    let text = text.rfind(" at ").map_or(text, |i| &text[..i]);
+    text.trim_end_matches([',', ' ']).to_string()
 }
 
 /// The arrangement from ArgyllCMS's display descriptions, where KDE can't

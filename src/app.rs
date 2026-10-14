@@ -45,7 +45,7 @@ impl Step {
         match self {
             Step::Display => "Display",
             Step::Instrument => "Spectro",
-            Step::Targets => "Settings",
+            Step::Targets => "Parameters",
             Step::Run => "Measure",
             Step::Verify => "Verify",
             Step::Report => "Report",
@@ -524,7 +524,7 @@ impl App {
         } else if self.inventory.displays.is_empty() {
             Err("No display found")
         } else if self.inventory.instruments.is_empty() {
-            Err("No instrument found. Connect one and refresh.")
+            Err(NO_INSTRUMENT)
         } else {
             Ok(())
         }
@@ -1295,7 +1295,7 @@ impl App {
     }
 
     fn page_display(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Display");
+        ui.heading("Display Selection");
         Self::gap(ui);
         ui.label(
             "Select a display to calibrate. During the calibration process, colored patches will be displayed at \
@@ -1434,7 +1434,7 @@ impl App {
         if self.scan.is_some() {
             Self::looking(ui);
         } else if self.inventory.instruments.is_empty() {
-            ui.label(RichText::new("No instrument found. Connect one, then refresh.").color(t.caution));
+            ui.label(RichText::new("No instrument found. Connect one, then search again.").color(t.caution));
         }
         for (i, inst) in self.inventory.instruments.iter().enumerate() {
             ui.radio_value(&mut self.instrument, i, instrument_name(&inst.description)).on_hover_text(&inst.description);
@@ -1444,7 +1444,7 @@ impl App {
             self.access_notice(ui);
         }
         Self::gap(ui);
-        if ui.add_enabled(self.scan.is_none(), egui::Button::new("Refresh")).clicked() {
+        if ui.add_enabled(self.scan.is_none(), egui::Button::new("Search Again")).clicked() {
             self.refresh_inventory();
         }
         self.corrections_section(ui);
@@ -1606,7 +1606,7 @@ impl App {
 
     fn page_targets(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::get(ui.ctx());
-        ui.heading("Settings");
+        ui.heading("Calibration Parameters");
         Self::gap(ui);
         if let Some(d) = self.display_label() {
             let backlight = self.correction_label().unwrap_or_else(|| "instrument default".into());
@@ -1777,14 +1777,16 @@ impl App {
 
     fn page_run(&mut self, ui: &mut egui::Ui) {
         let t = Tokens::get(ui.ctx());
-        ui.heading("Measurement");
+        ui.heading("Display Measurement");
         Self::gap(ui);
         if let Some(inst) = self.inventory.instruments.get(self.instrument) {
             let correction = self.correction_label().map(|c| format!(", corrected for {c}")).unwrap_or_default();
             Self::context_line(ui, format!("Instrument: {}{correction}", instrument_name(&inst.description)));
             Self::gap(ui);
         }
-        Self::context_line(ui, format!("Goals: {}", self.settings.targets.describe()));
+        Self::context_line(ui, format!("Parameters: {}", self.settings.targets.describe()));
+        Self::gap(ui);
+        Self::context_line(ui, "Note: dark patches may need long integration times for accuracy.".into());
         Self::gap(ui);
         let running = self.job.is_some();
         if self.cal_run.as_ref().is_some_and(|r| r.naming.is_some()) {
@@ -2363,6 +2365,11 @@ impl App {
                 ui.add_space(4.0);
             }
         }
+        // Said on a line of its own above Begin, rather than beside it
+        if running.is_none() && self.ready() == Err(NO_INSTRUMENT) {
+            ui.label(RichText::new(NO_INSTRUMENT).color(t.caution));
+            Self::gap(ui);
+        }
         ui.horizontal(|ui| {
             match (self.ready(), running) {
                 (Ok(()), None) => {
@@ -2388,7 +2395,9 @@ impl App {
                 }
                 (Err(why), None) => {
                     ui.add_enabled(false, egui::Button::new("Begin"));
-                    ui.label(RichText::new(why).color(t.caution));
+                    if why != NO_INSTRUMENT {
+                        ui.label(RichText::new(why).color(t.caution));
+                    }
                 }
             }
             if let Some((ok, text)) = self.status.as_ref().filter(|_| status_inline) {
@@ -2457,7 +2466,7 @@ impl App {
             }
         }
         let running = self.job.is_some();
-        ui.heading("Verify");
+        ui.heading("Profile Verification");
         Self::gap(ui);
         ui.label("Measures 57 patches through a profile's calibration and compares them with what the profile predicts.");
         Self::gap(ui);
@@ -2788,6 +2797,9 @@ fn with_field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
         add(ui);
     });
 }
+
+/// Why Begin is disabled with no instrument connected
+const NO_INSTRUMENT: &str = "No instrument.";
 
 /// A display's name without its model: "eDP-1 (Sharp Corporation eDP-1)"
 /// -> "eDP-1"
@@ -3143,7 +3155,7 @@ mod hardware_adjust_tests {
     fn adjust_through_settings() {
         let mut harness = Harness::builder().with_size(egui::vec2(980.0, 640.0)).wgpu().build_eframe(|cc| App::new(cc));
         super::hardware_tests::wait_for_scan(&mut harness);
-        harness.get_by_label("3  Settings").click();
+        harness.get_by_label("3  Parameters").click();
         harness.run_steps(2);
         harness.get_by_label("Adjust…").click();
         harness.step();

@@ -5,7 +5,7 @@
 - `src/main.rs`: eframe window setup (wgpu, Wayland or X11, title `DisplayCraft <version>` from `CARGO_PKG_VERSION`,
   app id `displaycraft`).
 - `src/app.rs`: the workflow UI. A step sidebar (numbered Display,
-  Spectro, Settings, Measure, Verify, then Report and Profiles below a
+  Spectro, Parameters, Measure, Verify, then Report and Profiles below a
   separator) and a page per step. Internally the
   steps keep their older names (`Step::Instrument`, `Step::Targets`,
   `Step::Run`). Pages put one and a half text rows (`App::gap()`) after the
@@ -70,6 +70,11 @@
   `Step::always_open()`: reachable, and free of ArgyllCMS warnings, where
   ArgyllCMS can't run. During a run their sidebar buttons are disabled,
   like the steps other than the running one's.
+- Page headings: Display Selection, Spectrophotometer or Colorimeter,
+  Calibration Parameters (the "Parameters" step), Display Measurement,
+  Profile Verification. With no instrument connected, Begin is disabled
+  with "No instrument." on its own line above it, 1.5 rows apart
+  (`NO_INSTRUMENT`); other reasons show beside the button.
 - Preferences is a page (`Step::Preferences`, `page_preferences()`), its
   button at the foot of the sidebar, with About under it, above the ArgyllCMS version (no path:
   the AppImage's mount point changes every run, and Preferences shows the
@@ -91,7 +96,9 @@
   the reason and tries `kdialog`, then `zenity`.
 - `src/theme.rs`: LightCraft's four themes (Charcoal, Midnight, Silver,
   Paper), Inter fonts, and egui styling through
-  `craft_ui::theme::WidgetPalette`.
+  `craft_ui::theme::WidgetPalette`. Spacing: items 6 × 4, button padding
+  8 × 3, and 8 between a radio button's or checkbox's mark and its label
+  (`icon_spacing`; egui's 4 crowds the label).
 
 ## Logo, icon and installing
 
@@ -134,7 +141,8 @@ use it, and other applications' icons in the user's folder made it fail.)
 ## Platform check
 
 Whether DisplayCraft can run is ArgyllCMS's call: the identify step
-(`App::refresh_inventory`, at startup, on Refresh and on every ArgyllCMS
+(`App::refresh_inventory`, at startup, on Refresh (Display) or Search Again
+(Spectro) and on every ArgyllCMS
 change in Preferences) first runs
 `dispwin -Q` (`argyll::check_platform`), parsed into an `argyll::Session`:
 desktop, Wayland compositor, X server and window manager, the display
@@ -148,7 +156,8 @@ ArgyllCMS): a warning above every page but Preferences, and the rest
 works. Identification takes about 4 s, mostly `dispcal -?` probing USB and
 serial ports for instruments, so it runs on a thread (`App::scan`, taken up
 by `poll_scan()` in `logic()`): the window opens at once, Display and
-Spectro show a spinner, Refresh is disabled and Begin explains the wait. A
+Spectro show a spinner, Refresh and Search Again are disabled and Begin
+explains the wait. A
 new scan replaces a running one, whose result is dropped.
 
 ## Running ArgyllCMS
@@ -243,14 +252,14 @@ inline.
   cancelled verification likewise), and a calibration only counts
   as done when both its `.cal` and `.icc` exist.
 
-## Settings (targets)
+## Parameters (targets)
 
 White point choices are D50, D55 and D65 (daylight 5000, 5500, 6500 K),
 Native (no `-t`) and Custom, a daylight temperature typed in. Tonal
 response is gamma 2.2, gamma 1.8, the sRGB curve or a custom gamma.
 `Targets::kelvin()` and `Targets::gamma_arg()` give the `-t` and `-g`
-values; `Targets::describe()` gives the "Goals" line on the Measurement
-page. Settings shows the chosen display and its backlight correction
+values; `Targets::describe()` gives the "Parameters" line on the Measurement
+page. Parameters shows the chosen display and its backlight correction
 (correction file or display type) under the heading; Measurement shows the
 instrument (the name from Argyll's description, without the USB path) and
 correction. Its log is collapsed by default.
@@ -280,10 +289,10 @@ X, Y and Z, as a percentage of white's Y. It's shown in the summary card
 ("Channel additivity: off by N%") and the report. A shaper+matrix profile
 (no `A2B0` tag, `profiles::Info::lut`) that doesn't verify Good gets advice:
 over `verify::ADDITIVITY_LIMIT` (2%), that a LUT may verify better, with a
-button that switches Settings to LUT (raising Low to Medium) and opens them;
+button that switches Parameters to LUT (raising Low to Medium) and opens them;
 under it, that a LUT is unlikely to help. This panel is off by 0.26%. The
 LUT help says to try Shaper+matrix first and that Verify will suggest a LUT
-when it looks worthwhile. Settings rows are spaced out
+when it looks worthwhile. Parameters rows are spaced out
 and wrap (`choices()`; `with_field()` keeps a Custom choice next to its
 value).
 
@@ -493,7 +502,7 @@ another distribution.
 
 ## Adjusting the display's controls
 
-Settings has an Adjust… button (Display controls). It runs `dispcal -v -d D
+Parameters has an Adjust… button (Display controls). It runs `dispcal -v -d D
 -c C [-y|-X] [-t K] [-b B] work/adjust` without `-m`, a job of its own
 (`JobKind::Adjust`), and leaves with Exit (8), so nothing is written and
 calibrating stays the Measure step's. After placing the instrument, dispcal
@@ -658,7 +667,7 @@ KWin keeps the path but switches to sRGB.
 
 - `app::page_pictures::render_pages` (ignored by default; needs ArgyllCMS
   and a GPU, through egui_kittest's `wgpu` and `snapshot` dev features)
-  renders Display, Spectro, Settings, Measurement and Verify, with made-up
+  renders Display, Spectro, Parameters, Measurement and Verify, with made-up
   results, to
   `tmp/page-*.png`: Verify at 640 and 900 points tall and with the log
   open. The patch list grew with the window and shrank for the open log.
@@ -685,7 +694,7 @@ KWin keeps the path but switches to sRGB.
   calibrated a display other than the one DisplayCraft's window was on.
 
 - `app::hardware_tests::calibrate_and_profile` (ignored by default; Low
-  quality, saved Settings, `DISPLAYCRAFT_TEST_LUT=1` for LUT) runs the four
+  quality, saved Parameters, `DISPLAYCRAFT_TEST_LUT=1` for LUT) runs the four
   stages through the page without installing. D50, gamma 2.2, 100 patches:
   - Shaper+matrix: 603 s; calibration white point error 0.48 dE, average
     neutral 0.43; colprof check average 0.39, peak 1.23. Verified Good:
@@ -697,7 +706,7 @@ KWin keeps the path but switches to sRGB.
     Installed briefly, KWin took it in ICC mode with no warnings.
 
 - `app::hardware_adjust_tests::adjust_through_settings` (ignored by
-  default) runs the adjustment from Settings on the real panel: placement,
+  default) runs the adjustment from Parameters on the real panel: placement,
   the menu, White point with live readings (target 117.7 cd/m², x 0.3325,
   y 0.3476 for D55; reading x 0.3124, y 0.3430, ΔE 10.4, "Red up" first,
   as expected for native white near 6600 K), Done, Finish; KWin was back in

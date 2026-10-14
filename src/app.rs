@@ -190,10 +190,16 @@ struct Prefs {
     session: Option<Session>,
     /// A folder picker running on its own thread.
     picker: Option<Receiver<Option<PathBuf>>>,
+    /// The check running on its own thread: dispcal -? looks for
+    /// instruments, which takes seconds. A newer check replaces it, and
+    /// the old one's result is dropped.
+    checking: Option<Receiver<(Result<String, String>, Session)>>,
+    /// The choice changed: apply it once its check passes
+    apply_when_checked: bool,
 }
 
 impl Prefs {
-    fn from_settings(settings: &Settings) -> Prefs {
+    fn from_settings(settings: &Settings, ctx: &egui::Context) -> Prefs {
         let mut prefs = Prefs {
             source: match &settings.argyll_bin {
                 Some(_) => Source::Other,
@@ -203,8 +209,10 @@ impl Prefs {
             check: None,
             session: None,
             picker: None,
+            checking: None,
+            apply_when_checked: false,
         };
-        prefs.recheck();
+        prefs.recheck(ctx);
         prefs
     }
 
@@ -221,20 +229,42 @@ impl Prefs {
         }
     }
 
-    /// Check the chosen ArgyllCMS, and ask it about the session.
-    fn recheck(&mut self) {
+    /// Check the chosen ArgyllCMS, and ask it about the session, on a
+    /// thread (see `poll()`)
+    fn recheck(&mut self, ctx: &egui::Context) {
+        self.check = None;
+        self.session = None;
         let Some(dir) = self.dir() else {
+            self.checking = None;
             self.check = Some(Err(match self.source {
                 Source::Bundled(_) => system::current().no_bundled().into(),
                 Source::Other => "Choose the directory holding the ArgyllCMS programs".into(),
             }));
-            self.session = None;
             return;
         };
-        self.check = Some(argyll::probe(&dir));
         // Another ArgyllCMS is left to choose for itself, like Auto
-        let session = argyll::check_platform_as(&dir, self.variant());
+        let variant = self.variant();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let check = argyll::probe(&dir);
+            let session = argyll::check_platform_as(&dir, variant);
+            let _ = tx.send((check, session));
+            ctx.request_repaint();
+        });
+        self.checking = Some(rx);
+    }
+
+    /// Take a finished check. Returns true if the choice should now be
+    /// applied: it changed, and it passed.
+    fn poll(&mut self) -> bool {
+        let Some(rx) = &self.checking else { return false };
+        let Ok((check, session)) = rx.try_recv() else { return false };
+        self.checking = None;
+        let passed = check.is_ok();
+        self.check = Some(check);
         self.session = Some(session);
+        std::mem::take(&mut self.apply_when_checked) && passed
     }
 
     /// The bundled variant to pin, or None to follow detection
@@ -997,13 +1027,12 @@ impl App {
 
     fn page_preferences(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let mut prefs = self.prefs.take().unwrap_or_else(|| Prefs::from_settings(&self.settings));
+        let mut prefs = self.prefs.take().unwrap_or_else(|| Prefs::from_settings(&self.settings, ui.ctx()));
         let t = Tokens::get(&ctx);
         let running = self.job.is_some();
 
-        // Set when the ArgyllCMS choice changes; it takes effect at once if
-        // it passes its check
-        let mut changed = false;
+        // A changed ArgyllCMS choice takes effect once its check passes
+        let apply = prefs.poll();
 
         // Folder picker result from its thread
         if let Some(rx) = &prefs.picker {
@@ -1012,8 +1041,8 @@ impl App {
                 if let Some(dir) = picked {
                     prefs.source = Source::Other;
                     prefs.path = dir.display().to_string();
-                    prefs.recheck();
-                    changed = true;
+                    prefs.recheck(&ctx);
+                    prefs.apply_when_checked = true;
                 }
             }
         }
@@ -1043,8 +1072,8 @@ impl App {
                             let radio = ui.add_enabled(bundled.is_some(), egui::RadioButton::new(prefs.source == source, label));
                             if radio.clicked() {
                                 prefs.source = source;
-                                prefs.recheck();
-                                changed = true;
+                                prefs.recheck(&ctx);
+                                prefs.apply_when_checked = true;
                             }
                             if let Some(dir) = &bundled {
                                 radio.on_hover_text(dir.display().to_string());
@@ -1056,8 +1085,8 @@ impl App {
                     }
                     if ui.radio(prefs.source == Source::Other, "Other ArgyllCMS, in this directory:").clicked() {
                         prefs.source = Source::Other;
-                        prefs.recheck();
-                        changed = true;
+                        prefs.recheck(&ctx);
+                        prefs.apply_when_checked = true;
                     }
                     ui.horizontal(|ui| {
                         ui.add_space(18.0);
@@ -1067,8 +1096,8 @@ impl App {
                             egui::TextEdit::singleline(&mut prefs.path).desired_width(300.0),
                         );
                         if edit.lost_focus() && prefs.other_dir() != self.settings.argyll_bin {
-                            prefs.recheck();
-                            changed = true;
+                            prefs.recheck(&ctx);
+                            prefs.apply_when_checked = true;
                         }
                         let browsing = prefs.picker.is_some();
                         if ui.add_enabled(other && !browsing, egui::Button::new("Browse…")).clicked() {
@@ -1088,27 +1117,34 @@ impl App {
                     });
                 });
                 ui.add_space(4.0);
-                match &prefs.check {
-                    Some(Ok(version)) => ui.label(RichText::new(format!("Found ArgyllCMS {version}")).color(t.good)),
-                    Some(Err(why)) => {
-                        let still = match &self.bin {
-                            Some(bin) => format!(". Still using {}.", bin.display()),
-                            None => String::new(),
-                        };
-                        ui.label(RichText::new(format!("{why}{still}")).color(t.bad))
-                    }
-                    None => ui.label(""),
-                };
-                if prefs.check.as_ref().is_some_and(|c| c.is_ok()) {
-                    match prefs.session.as_ref().map(|s| &s.platform) {
-                        Some(Platform::Supported(what)) => ui.label(RichText::new(format!("Supported: {what}")).color(t.good)),
-                        Some(Platform::Limited(what)) => ui.label(RichText::new(format!("Limited: {what}")).color(t.caution)),
-                        Some(Platform::Unsupported(why)) => ui.label(RichText::new(format!("Not supported: {why}")).color(t.bad)),
-                        Some(Platform::Unknown) => ui.label(
-                            RichText::new("This ArgyllCMS can't say whether it supports this session").color(t.caution),
-                        ),
+                if prefs.checking.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Checking ArgyllCMS…");
+                    });
+                } else {
+                    match &prefs.check {
+                        Some(Ok(version)) => ui.label(RichText::new(format!("Found ArgyllCMS {version}")).color(t.good)),
+                        Some(Err(why)) => {
+                            let still = match &self.bin {
+                                Some(bin) => format!(". Still using {}.", bin.display()),
+                                None => String::new(),
+                            };
+                            ui.label(RichText::new(format!("{why}{still}")).color(t.bad))
+                        }
                         None => ui.label(""),
                     };
+                    if prefs.check.as_ref().is_some_and(|c| c.is_ok()) {
+                        match prefs.session.as_ref().map(|s| &s.platform) {
+                            Some(Platform::Supported(what)) => ui.label(RichText::new(format!("Supported: {what}")).color(t.good)),
+                            Some(Platform::Limited(what)) => ui.label(RichText::new(format!("Limited: {what}")).color(t.caution)),
+                            Some(Platform::Unsupported(why)) => ui.label(RichText::new(format!("Not supported: {why}")).color(t.bad)),
+                            Some(Platform::Unknown) => ui.label(
+                                RichText::new("This ArgyllCMS can't say whether it supports this session").color(t.caution),
+                            ),
+                            None => ui.label(""),
+                        };
+                    }
                 }
 
                 Self::gap(ui);
@@ -1129,7 +1165,7 @@ impl App {
 
         // Every change rescans displays and instruments, even choosing the
         // one already in use, which is a way to look again
-        if changed && !running && prefs.check.as_ref().is_some_and(|c| c.is_ok()) {
+        if apply && !running {
             self.settings.argyll_bin = if prefs.source == Source::Other { prefs.other_dir() } else { None };
             self.settings.argyll_variant = prefs.variant();
             Self::tell_window_system(&self.settings);
@@ -1207,7 +1243,7 @@ impl App {
             ui.label("(MIT or Apache 2.0), and text is set in");
             link(ui, "Inter", "https://rsms.me/inter/");
             ui.label("(SIL Open Font License 1.1). DisplayCraft is not affiliated with or endorsed by ArtCraft, but is built around its libraries and \
-                      other technologies.");
+                      other technologies for a consistent look and feel.");
         });
     }
 
@@ -1336,7 +1372,7 @@ impl App {
             }
         }
         Self::gap(ui);
-        if ui.add_enabled(self.scan.is_none(), egui::Button::new("Refresh")).clicked() {
+        if ui.add_enabled(self.scan.is_none(), egui::Button::new("Search Again")).clicked() {
             self.refresh_inventory();
         }
     }
@@ -1653,8 +1689,11 @@ impl App {
             Self::gap(ui);
             self.cancel_button(ui);
         }
+        // A row more than the usual gap, setting the targets apart from the
+        // display controls above
         Self::gap(ui);
-        ui.label("What the calibration should aim for.");
+        ui.add_space(ui.text_style_height(&egui::TextStyle::Body));
+        ui.label("Choose what the calibration and profiling should aim for:");
         Self::gap(ui);
         let tg = &mut self.settings.targets;
         // Fixed while adjusting: dispcal took the targets when it started

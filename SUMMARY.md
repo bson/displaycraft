@@ -141,8 +141,8 @@ use it, and other applications' icons in the user's folder made it fail.)
 ## Platform check
 
 Whether DisplayCraft can run is ArgyllCMS's call: the identify step
-(`App::refresh_inventory`, at startup, on Refresh (Display) or Search Again
-(Spectro) and on every ArgyllCMS
+(`App::refresh_inventory`, at startup, on Search Again (Display and
+Spectro) and on every ArgyllCMS
 change in Preferences) first runs
 `dispwin -Q` (`argyll::check_platform`), parsed into an `argyll::Session`:
 desktop, Wayland compositor, X server and window manager, the display
@@ -156,7 +156,7 @@ ArgyllCMS): a warning above every page but Preferences, and the rest
 works. Identification takes about 4 s, mostly `dispcal -?` probing USB and
 serial ports for instruments, so it runs on a thread (`App::scan`, taken up
 by `poll_scan()` in `logic()`): the window opens at once, Display and
-Spectro show a spinner, Refresh and Search Again are disabled and Begin
+Spectro show a spinner, Search Again is disabled and Begin
 explains the wait. A
 new scan replaces a running one, whose result is dropped.
 
@@ -184,8 +184,12 @@ new scan replaces a running one, whose result is dropped.
   Browse. Each change rechecks with `argyll::probe()` (a
   `dispcal` that runs and reports a version) and
   `argyll::check_platform_as()` for that choice, showing "This session: …"
-  and the supported / limited / unsupported line. A change that passes
-  the probe takes effect at once: saved (Auto as no `argyll_variant`),
+  and the supported / limited / unsupported line. The check runs on a
+  thread (`Prefs::recheck()`/`poll()`; the probe's `dispcal -?` looks for
+  instruments, which takes seconds), with a spinner and "Checking
+  ArgyllCMS…" meanwhile, so the page opens at once; a newer check replaces
+  a running one, whose result is dropped. A change that passes the probe
+  takes effect when the check is in (`apply_when_checked`): saved (Auto as no `argyll_variant`),
   and displays and instruments scanned again; choosing the one in use
   rescans too. The directory field counts as a change when it loses focus
   with a different path. A failing choice isn't applied, and the error
@@ -371,9 +375,9 @@ description's "at X, Y, width W, height H" in desktop coordinates, which
 also stand in for the size shown, "Primary" in it marking the primary,
 the name from `display_name()`, and its place in the list kept in
 `argyll_index`; descriptions that don't parse are left out. A monitor
-plugged in later appears after Refresh.
+plugged in later appears after Search Again.
 
-To check with real monitors: plug them in and press Refresh on the Display
+To check with real monitors: plug them in and press Search Again on the Display
 page; the map should match System Settings > Display Configuration
 (positions, portrait monitors, primary); clicking each should select it in
 the dropdown; Measure, Verify and Report should then put their patches on

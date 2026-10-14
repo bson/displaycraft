@@ -400,8 +400,11 @@ each connected output's position, mode size, scale, rotation, priority
 logical, so sizes are divided by the scale and swapped for a quarter turn
 (rotation 2 or 8). The Display page draws the enabled, unmirrored outputs to
 fit 600 × 190 points (`display_map()`), each labelled with its name, model
-(from Argyll's description), mode size and "primary", the selected one in
-the accent colour. Each is matched to Argyll's display list by output name,
+(from Argyll's description), mode size (as turned) and "primary", the selected one in
+the accent colour. The labels wrap to the rectangle's width, up to three
+lines each and elided past that, as a long model name ("ASUSTek COMPUTER
+INC PA279CRV") on one centered line was cut off at both ends; the
+`display-three` render has one. Each is matched to Argyll's display list by output name,
 the same in both, or by `argyll_index` for outputs made from Argyll's
 list; one Argyll doesn't list is marked and can't be chosen.
 Clicking one selects it, the same selection as the dropdown below (and the

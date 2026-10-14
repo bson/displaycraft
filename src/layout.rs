@@ -16,7 +16,8 @@ pub struct Output {
     pub y: f64,
     pub width: f64,
     pub height: f64,
-    /// Mode size in pixels, as the panel runs
+    /// Mode size in pixels, as the output is turned (1200 x 1920 for a
+    /// 1920 x 1200 panel on its side)
     pub pixels: (u32, u32),
     pub primary: bool,
     pub enabled: bool,
@@ -83,8 +84,9 @@ pub fn parse(json: &str) -> Option<Vec<Output>> {
             .map(|o| {
                 let (w, h) = o.size.map(|s| (s.width, s.height)).unwrap_or((0.0, 0.0));
                 let scale = if o.scale > 0.0 { o.scale } else { 1.0 };
-                // A quarter turn swaps the sides
-                let (lw, lh) = if matches!(o.rotation, 2 | 8) { (h / scale, w / scale) } else { (w / scale, h / scale) };
+                // A quarter turn swaps the sides, of the mode as shown too
+                let (w, h) = if matches!(o.rotation, 2 | 8) { (h, w) } else { (w, h) };
+                let (lw, lh) = (w / scale, h / scale);
                 let (x, y) = o.pos.map(|p| (p.x, p.y)).unwrap_or((0.0, 0.0));
                 Output {
                     name: o.name,
@@ -169,7 +171,7 @@ mod tests {
         let o = parse(json).unwrap();
         assert_eq!(o.len(), 3, "disconnected outputs are left out");
         assert_eq!((o[0].width, o[0].height, o[0].primary), (2048.0, 1280.0, true));
-        assert_eq!((o[1].width, o[1].height, o[1].pixels), (1200.0, 1920.0, (1920, 1200)), "rotated a quarter turn");
+        assert_eq!((o[1].width, o[1].height, o[1].pixels), (1200.0, 1920.0, (1200, 1920)), "rotated a quarter turn");
         assert!(!o[2].enabled && o[2].mirrored);
         assert!(parse("not json").is_none());
     }

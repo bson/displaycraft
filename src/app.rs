@@ -1476,13 +1476,26 @@ impl App {
             if index.is_none() {
                 lines.push(("not available to ArgyllCMS".into(), egui::FontId::proportional(10.5), t.caution));
             }
-            let total: f32 = lines.iter().map(|(_, f, _)| f.size + 3.0).sum();
+            // Wrapped to the rectangle, as a long model name ("ASUSTek COMPUTER
+            // INC PA279CRV") centered on one line would be cut off at both
+            // ends; more than three lines is elided instead.
+            let galleys: Vec<_> = lines
+                .into_iter()
+                .map(|(text, font, color)| {
+                    let mut job = egui::text::LayoutJob::simple(text, font, color, (r.width() - 8.0).max(1.0));
+                    job.halign = egui::Align::Center;
+                    job.wrap.max_rows = 3;
+                    painter.layout_job(job)
+                })
+                .collect();
+            let total: f32 = galleys.iter().map(|g| g.size().y + 2.0).sum();
             let mut y = r.center().y - total / 2.0;
-            for (text, font, color) in lines {
-                let size = font.size;
-                // Clipped to the rectangle, so a small output's labels don't spill
-                ui.painter_at(r).text(egui::pos2(r.center().x, y), egui::Align2::CENTER_TOP, text, font, color);
-                y += size + 3.0;
+            for galley in galleys {
+                let height = galley.size().y;
+                // Clipped to the rectangle, so a small output's labels don't spill.
+                // Centered rows are laid out around x = 0, hence the center as origin.
+                ui.painter_at(r).galley(egui::pos2(r.center().x, y), galley, t.text);
+                y += height + 2.0;
             }
             if response.clicked() {
                 clicked = index;
@@ -3449,7 +3462,7 @@ mod page_pictures {
                 let app = harness.state_mut();
                 app.inventory.displays.push(argyll::Choice {
                     value: "2".into(),
-                    description: "Monitor 2, Output DP-3 (Dell U2413) at 2048, 0, width 1200, height 1920".into(),
+                    description: "Monitor 2, Output DP-3 (ASUSTek COMPUTER INC PA279CRV) at 2048, 0, width 1200, height 1920".into(),
                 });
                 app.layout = layout::parse(
                     r#"{"outputs": [

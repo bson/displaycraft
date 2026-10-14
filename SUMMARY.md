@@ -555,7 +555,21 @@ per file, as unzipped uploads take one each); "Run workflow" on the
 Actions tab stops there. On a `v*` tag, a `release` job that needs all of them
 downloads them and publishes a GitHub release with all of them
 (`gh release create`, with generated notes), so a release only appears
-when every platform built. Each job caches its build output keyed on
+when every platform built. If a release for the tag already exists, the
+job leaves it as it is.
+
+Releases: a test build's files can be published once they've been tried,
+so the release is exactly what was tested (test files are kept 14 days):
+
+    gh run download <run id> --repo bson/displaycraft -D tmp/release
+    gh release create v<version> tmp/release/* --repo bson/displaycraft \
+        --target <the run's commit> --title "DisplayCraft <version>" --generate-notes
+
+Creating the release creates and pushes the tag, which runs the workflow
+for it; its release job then finds the release and keeps it. The tag
+must be `v` plus Cargo.toml's version, which the tag build checks. A tag
+names a commit whose workflow has this check, so a run made before the
+check was added is released from a later commit with the same code. Each job caches its build output keyed on
 `Cargo.lock` (and appimagetool or jam). Uploads use
 `upload-artifact@v7` with `archive: false`, so the AppImage and the disk
 image download as they are (the artifact takes the file's name), and the

@@ -5,6 +5,9 @@
 # - Pushing a version tag (git tag v0.1.0 && git push origin v0.1.0): the
 #   same, then a public release with every platform's build attached. The
 #   tag must match the version in Cargo.toml.
+# - A release can instead be made from a test build's files once they've
+#   been tried (see SUMMARY.md, Releases); creating it pushes the tag, and
+#   the tag's build then leaves that release as it is.
 #
 # Each platform is a job uploading its build; the release job collects
 # them, so a release only appears when all of them built.
@@ -118,9 +121,15 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # A release already made from tested files is kept: these are a new
+      # build of the same commit, not the files that were tried
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; leaving it as it is"
+            exit 0
+          fi
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
             --title "DisplayCraft ${GITHUB_REF_NAME#v}" --generate-notes

@@ -523,7 +523,10 @@ fn read_output(mut stream: Box<dyn Read + Send>, tx: Sender<Event>, wake: impl F
             wake();
             continue;
         }
-        if !prompted && is_prompt(&rest) {
+        // Only once it's all arrived: output can come in pieces (on
+        // Windows a prompt was split mid-word), and every prompt ends with
+        // a colon
+        if !prompted && is_prompt(&rest) && rest.trim_end().ends_with(':') {
             let _ = tx.send(Event::Prompt { prompt: rest, before: std::mem::take(&mut before) });
             pending.clear();
             prompted = true;

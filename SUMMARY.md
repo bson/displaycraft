@@ -43,6 +43,10 @@
   compile (`cargo check`) for `aarch64-apple-darwin` and
   `x86_64-pc-windows-gnu`; the kscreen-doctor parsing in `profiles.rs` is
   Linux-only.
+- The Log (`log_view()`) is one multi-line label, so a selection copies
+  with its line breaks (egui joins a selection across labels without
+  them), with a Copy log button above it for all of it, since a selection
+  can't scroll.
 - Windows: release builds are GUI programs (`windows_subsystem` in
   `main.rs`), and every ArgyllCMS program is started with
   `CREATE_NO_WINDOW` (`system::no_console()`, through `argyll::told()`),
@@ -235,7 +239,8 @@ new scan replaces a running one, whose result is dropped.
   last four lines printed before it, which say what went wrong). Most
   prompts have no trailing newline, so the unterminated remainder is
   checked (`is_prompt()`: "Esc or Q" in any case, "any other key", or a
-  trailing "continue:"); complete lines are checked too, as "Hit any key to
+  trailing "continue:"), once it ends with a colon, as every prompt does
+  (output can arrive in pieces: on Windows a prompt was split mid-word); complete lines are checked too, as "Hit any key to
   retry, or Esc or Q to abort:" after a failed instrument calibration ends
   with one. Argyll's `next_con_char`/`poll_con_char`
   `tcgetattr` warnings (stdin isn't a terminal) are printed without line

@@ -2478,6 +2478,11 @@ impl App {
 
     fn log_view(&self, ui: &mut egui::Ui, max_height: f32) {
         let t = Tokens::get(ui.ctx());
+        // All of it at once: a selection can't be dragged beyond what's
+        // scrolled into view
+        if ui.add_enabled(!self.log.is_empty(), egui::Button::new("Copy log").small()).clicked() {
+            ui.ctx().copy_text(self.log.join("\n"));
+        }
         egui::Frame::new().fill(t.field).corner_radius(4).inner_margin(6).show(ui, |ui| {
             let mut area = ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).max_height(max_height);
             // A set height, not just a limit: the Verify page sizes its
@@ -2486,10 +2491,10 @@ impl App {
             if max_height.is_finite() {
                 area = area.min_scrolled_height(max_height);
             }
+            // One label rather than one per line: egui joins a selection
+            // across labels without line breaks
             area.show(ui, |ui| {
-                for line in &self.log {
-                    ui.label(RichText::new(line).monospace().size(11.5));
-                }
+                ui.label(RichText::new(self.log.join("\n")).monospace().size(11.5));
             });
         });
     }

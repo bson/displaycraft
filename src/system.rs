@@ -69,6 +69,10 @@ pub trait System: Sync {
     fn without_profile(&self) -> &'static str {
         ""
     }
+
+    /// Called when an ArgyllCMS program that may have changed display
+    /// `display`'s calibration curves has ended, however it ended
+    fn after_curves_changed(&self, _argyll_bin: &Path, _display: &str) {}
 }
 
 /// Run `cmd` without a console window of its own. On Windows a console
@@ -303,6 +307,19 @@ impl System for MacOs {
 
     fn color_manager(&self) -> &'static str {
         "macOS"
+    }
+
+    /// macOS 27 workaround, hopefully temporary: when a program that set the
+    /// curves exits, macOS loads an all-zero table instead of the profile's
+    /// calibration, leaving the display black. ArgyllCMS avoids that when it
+    /// exits normally, but not when it's killed (Cancel), so load the
+    /// profile's calibration in the way that lasts (`dispwin -L`). Waits for
+    /// it, so that it can't race the next stage's program.
+    fn after_curves_changed(&self, argyll_bin: &Path, display: &str) {
+        let _ = crate::argyll::command(argyll_bin.join("dispwin"))
+            .args(["-d", display, "-L"])
+            .stdin(std::process::Stdio::null())
+            .output();
     }
 }
 

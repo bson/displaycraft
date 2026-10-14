@@ -39,7 +39,15 @@
   answer through `kscreen-doctor -o` (which also says whether it's in ICC
   mode at all), elsewhere ArgyllCMS's `dispwin -d n -W`
   (`argyll::installed_profile()`); `color_manager()` ("KDE", "macOS",
-  "Windows") and `without_profile()` word the page and messages. Checked to
+  "Windows") and `without_profile()` word the page and messages.
+  `after_curves_changed()`, called from `poll_job()` when a dispcal,
+  dispread or dispwin job ends (`JobKind::changes_curves()`), does nothing
+  except on macOS, where it runs `dispwin -d n -L` and waits for it: a
+  macOS 27 workaround. There, when a program that set the calibration
+  curves exits, macOS loads an all-zero table instead of the profile's
+  calibration, so the display stays black (at full brightness, so a key
+  press doesn't help). ArgyllCMS works around it itself when it exits
+  normally (see its SUMMARY), but not when killed by Cancel. Checked to
   compile (`cargo check`) for `aarch64-apple-darwin` and
   `x86_64-pc-windows-gnu`; the kscreen-doctor parsing in `profiles.rs` is
   Linux-only.

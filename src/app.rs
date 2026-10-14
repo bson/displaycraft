@@ -98,6 +98,12 @@ impl JobKind {
         }
     }
 
+    /// Whether the job's program may have changed the display's calibration
+    /// curves (dispcal, dispread and dispwin all set them)
+    fn changes_curves(self) -> bool {
+        !matches!(self, JobKind::Targen | JobKind::Colprof | JobKind::InstallRule)
+    }
+
     /// The page that shows this job
     fn step(self) -> Step {
         match self {
@@ -932,6 +938,11 @@ impl App {
         self.job = None;
         self.prompt = None;
         self.placing = false;
+        if kind.changes_curves() {
+            if let (Some(bin), Some(display)) = (&self.bin, self.inventory.displays.get(self.display)) {
+                crate::system::current().after_curves_changed(bin, &display.value);
+            }
+        }
         let cancelled = std::mem::take(&mut self.cancelled);
         let ok = code == Some(0) && !cancelled;
         match kind {

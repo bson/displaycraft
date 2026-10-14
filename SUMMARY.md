@@ -316,11 +316,21 @@ progress bar. Files are named after `base`,
    through the new calibration, writing `base.ti3`; `-Y p` because the
    instrument is already in place. `-k` also records the calibration in the
    `.ti3`.
-4. `colprof -v -q Q -a s|X -D description -O base.icc base`: shaper+matrix
-   (`s`) or an XYZ LUT with matrix tags as a fallback (`X`). The calibration
-   in the `.ti3` becomes the profile's vcgt. The description names the
-   output, time and targets; the Profiles page shows DisplayCraft profiles
-   by file name and the description on hover.
+   The run's files are named `<output>-<stamp>` in the data folder until
+   then. Measured, the page asks for a name (`CalRun::naming`,
+   `naming_panel()`): "Save as", prefilled with the display's short name
+   and the time ("eDP-1 2026-10-13 17:10"), with Save (or Enter) and
+   Discard. `profile_stem()` makes the file name: path separators, colons
+   (Finder shows them as slashes) and control characters become "-"; empty
+   or hidden-file names aren't accepted, nor one already used by a profile
+   in the data folder or installed (`name_problem()`). Save renames the
+   `.cal`, `.ti1` and `.ti3` to it (`save_profile()`), then:
+4. `colprof -v -q Q -a s|X -D name -M output -O name.icc name`:
+   shaper+matrix (`s`) or an XYZ LUT with matrix tags as a fallback (`X`).
+   The calibration in the `.ti3` becomes the profile's vcgt. The name is
+   the profile's description, so the system's color settings show it; the
+   model (dmdd) records the output it was made for. The Profiles page shows
+   DisplayCraft profiles by file name and the description on hover.
 
 KWin accepts both types: its ICC support reads BToA tables (lut8, lut16 and
 lutBToA) and uses them in its color shader. A failed or cancelled stage
@@ -603,10 +613,12 @@ ones record D50). dispcal describes its profiles by their output path, so
 those show the file name. The verdict is the newest `verify/` report's.
 The page opens with a display dropdown; it shares the selection with the
 Display page, which uses a dropdown too (with Argyll's position and size
-under it). This display's profiles come first. A DisplayCraft profile is
-named `<output>-<YYYYMMDD>-<HHMMSS>.icc` (`app::made_for()`), so one made
-for another output is marked "made for X", and Use warns on hover; other
-profiles carry no such mark. What's in use comes from `kscreen-doctor -o` (its JSON leaves out the
+under it). This display's profiles come first. A DisplayCraft profile
+records the output it was made for in its model (dmdd; read only for
+profiles in the data folder, as vendor profiles put other text there), or
+before naming existed, in its name, `<output>-<YYYYMMDD>-<HHMMSS>.icc`
+(`app::made_for()`). One made for another output is marked "made for X",
+and Use warns on hover; other profiles carry no such mark. What's in use comes from `kscreen-doctor -o` (its JSON leaves out the
 profile source): a profile counts only in ICC mode, since after `dispwin -U`
 KWin keeps the path but switches to sRGB.
 

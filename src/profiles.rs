@@ -17,6 +17,9 @@ pub struct Info {
     /// Has a device-to-PCS table (A2B0), i.e. is a LUT profile rather than
     /// curves and a matrix
     pub lut: bool,
+    /// The device model description (dmdd), where DisplayCraft records the
+    /// output a profile was made for (colprof -M)
+    pub model: String,
 }
 
 impl Info {
@@ -63,6 +66,7 @@ pub fn parse(b: &[u8]) -> Option<Info> {
         })
     };
     let description = tag(b"desc").and_then(text).unwrap_or_default();
+    let model = tag(b"dmdd").and_then(text).unwrap_or_default();
     let lut = tag(b"A2B0").is_some();
     let white = if version < 4 {
         tag(b"wtpt").filter(|t| t.starts_with(b"XYZ ")).and_then(|t| {
@@ -73,7 +77,7 @@ pub fn parse(b: &[u8]) -> Option<Info> {
     } else {
         None
     };
-    Some(Info { description, created, white, lut })
+    Some(Info { description, created, white, lut, model })
 }
 
 /// Text of a v2 'desc' or v4 'mluc' tag

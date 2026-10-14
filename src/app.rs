@@ -136,14 +136,19 @@ struct VerifyOutcome {
 /// after `base`: dispcal writes `.cal`, targen `.ti1`, dispread `.ti3` and
 /// colprof `.icc`.
 struct CalRun {
+    /// The run's files, under a provisional name until the user names the
+    /// profile
     base: PathBuf,
     /// dispcal's quick profile, which targen uses to spread the patches over
     /// what the display can show; kept out of the profiles folder
     quick: PathBuf,
     /// dispcal's summary of how close the calibration got
     summary: Vec<String>,
-    /// The new profile's description
-    description: String,
+    /// Measured and waiting for a name, which the profile is then built
+    /// under; the text being edited
+    naming: Option<String>,
+    /// The output it's for, e.g. "eDP-1", recorded as the profile's model
+    output: String,
 }
 
 impl CalRun {
@@ -525,13 +530,11 @@ impl App {
         }
     }
 
-    /// Where results go: $XDG_DATA_HOME/displaycraft, named after the output.
+    /// Where a run's files go while it measures: the data folder, under a
+    /// provisional name from the output and time (the user names the
+    /// profile at the end)
     fn output_base(&self) -> std::io::Result<PathBuf> {
-        let data = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-            .ok_or_else(|| std::io::Error::other("no HOME"))?;
-        let dir = data.join("displaycraft");
+        let dir = Self::data_dir()?;
         std::fs::create_dir_all(&dir)?;
         let output = self.inventory.displays.get(self.display).map(|d| output_name(&d.description)).unwrap_or_else(|| "display".into());
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
@@ -577,9 +580,8 @@ impl App {
         args.extend(["-o".into(), quick.display().to_string(), base.display().to_string()]);
 
         let output = self.inventory.displays.get(self.display).map(|d| output_name(&d.description)).unwrap_or_default();
-        let description = format!("{output} {}, {}", chrono::Local::now().format("%Y-%m-%d %H:%M"), t.describe());
         self.start_job(ctx, JobKind::Calibrate, &bin, "dispcal", &args);
-        self.cal_run = Some(CalRun { base, quick, summary: Vec::new(), description });
+        self.cal_run = Some(CalRun { base, quick, summary: Vec::new(), naming: None, output });
         self.outcome = None;
     }
 
@@ -611,24 +613,62 @@ impl App {
                 self.start_job(ctx, JobKind::ProfileRead, &bin, "dispread", &args);
             }
             JobKind::ProfileRead => {
-                // dispread -k put the calibration in the .ti3, so colprof
-                // embeds it as the profile's vcgt
-                let args: Vec<String> = vec![
-                    "-v".into(),
-                    "-q".into(),
-                    t.quality.arg().into(),
-                    "-a".into(),
-                    t.profile.arg().into(),
-                    "-D".into(),
-                    run.description.clone(),
-                    "-O".into(),
-                    run.base.with_extension("icc").display().to_string(),
-                    base,
-                ];
-                self.start_job(ctx, JobKind::Colprof, &bin, "colprof", &args);
+                // Measured: the profile is built once it's named
+                let name = format!("{} {}", self.display_label().map(|n| short_name(&n).to_string()).unwrap_or_default(), chrono::Local::now().format("%Y-%m-%d %H:%M"));
+                if let Some(run) = self.cal_run.as_mut() {
+                    run.naming = Some(name.trim().to_string());
+                }
             }
             _ => {}
         }
+    }
+
+    /// Why the profile can't be saved under `name`, if it can't: a name it
+    /// makes no file name of, or one already taken by a profile here or
+    /// installed
+    fn name_problem(name: &str) -> Option<&'static str> {
+        let Some(stem) = profile_stem(name) else { return Some("Enter a name for the profile") };
+        let file = format!("{stem}.icc");
+        let taken = Self::data_dir().ok().is_some_and(|d| d.join(&file).exists())
+            || system::current().installed_profiles_dir().is_some_and(|d| d.join(&file).exists());
+        taken.then_some("A profile with this name already exists")
+    }
+
+    /// Save the measured run under the name given: its files are renamed
+    /// to it, and the profile is built with it as its description
+    fn save_profile(&mut self, ctx: &egui::Context) {
+        let Some(bin) = self.bin.clone() else { return };
+        let Some(run) = self.cal_run.as_mut() else { return };
+        let Some(name) = run.naming.clone() else { return };
+        let Some(stem) = profile_stem(&name) else { return };
+        let base = run.base.with_file_name(&stem);
+        for ext in ["cal", "ti1", "ti3"] {
+            if let Err(e) = std::fs::rename(run.base.with_extension(ext), base.with_extension(ext)) {
+                self.status = Some((false, format!("Couldn't save as {stem}: {e}")));
+                return;
+            }
+        }
+        run.base = base.clone();
+        run.naming = None;
+        let t = &self.settings.targets;
+        // dispread -k put the calibration in the .ti3, so colprof embeds it
+        // as the profile's vcgt. The model (dmdd) records the display it
+        // was made for, which the name no longer does.
+        let args: Vec<String> = vec![
+            "-v".into(),
+            "-q".into(),
+            t.quality.arg().into(),
+            "-a".into(),
+            t.profile.arg().into(),
+            "-D".into(),
+            name,
+            "-M".into(),
+            run.output.clone(),
+            "-O".into(),
+            base.with_extension("icc").display().to_string(),
+            base.display().to_string(),
+        ];
+        self.start_job(ctx, JobKind::Colprof, &bin, "colprof", &args);
     }
 
     /// The chosen display, e.g. "eDP-1 (Sharp Corporation eDP-1)"
@@ -1747,7 +1787,9 @@ impl App {
         Self::context_line(ui, format!("Goals: {}", self.settings.targets.describe()));
         Self::gap(ui);
         let running = self.job.is_some();
-        if self.job_controls(ui, JobKind::Calibrate, false, true) {
+        if self.cal_run.as_ref().is_some_and(|r| r.naming.is_some()) {
+            self.naming_panel(ui);
+        } else if self.job_controls(ui, JobKind::Calibrate, false, true) {
             let ctx = ui.ctx().clone();
             self.start_calibration(&ctx);
         }
@@ -1778,6 +1820,52 @@ impl App {
         }
         Self::gap(ui);
         egui::CollapsingHeader::new("Log").default_open(false).show(ui, |ui| self.log_view(ui, f32::INFINITY));
+    }
+
+    /// Measured: the name to save the profile under, then Save, which
+    /// builds it, or Discard
+    fn naming_panel(&mut self, ui: &mut egui::Ui) {
+        let t = Tokens::get(ui.ctx());
+        let Some(name) = self.cal_run.as_ref().and_then(|r| r.naming.clone()) else { return };
+        let mut edited = name.clone();
+        let mut save = false;
+        let mut discard = false;
+        ui.label(RichText::new("Measured. Name the profile to save it.").color(t.text));
+        ui.add_space(4.0);
+        let problem = Self::name_problem(&edited);
+        ui.horizontal(|ui| {
+            ui.label("Save as");
+            let edit = ui.add(egui::TextEdit::singleline(&mut edited).desired_width(360.0));
+            if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && Self::name_problem(&edited).is_none() {
+                save = true;
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.add_enabled(problem.is_none(), egui::Button::new(RichText::new("Save").font(t.semibold(13.0)))).clicked() {
+                save = true;
+            }
+            if ui.button("Discard").on_hover_text("Delete this run's measurements").clicked() {
+                discard = true;
+            }
+            if let Some(p) = problem {
+                ui.label(RichText::new(p).color(t.caution));
+            }
+        });
+        if edited != name {
+            if let Some(run) = self.cal_run.as_mut() {
+                run.naming = Some(edited);
+            }
+        }
+        if discard {
+            if let Some(run) = self.cal_run.take() {
+                run.discard();
+            }
+            self.status = None;
+        } else if save {
+            let ctx = ui.ctx().clone();
+            self.save_profile(&ctx);
+        }
     }
 
     fn start_report(&mut self, ctx: &egui::Context) {
@@ -1906,6 +1994,10 @@ impl App {
                 None => {
                     let info = profiles::read(&path).unwrap_or_default();
                     let verdict = verify_dir.as_deref().and_then(|d| profiles::last_verdict(d, &path));
+                    // From the name ("eDP-1-<stamp>.icc"), or for named
+                    // profiles the model colprof recorded. Only DisplayCraft's
+                    // own are trusted for the latter (see below): vendor
+                    // profiles put other things there.
                     let made_for = made_for(&name).map(str::to_string);
                     let curves = profiles::read_curves(&path);
                     rows.push(ProfileRow { name, info, made: None, installed: None, verdict, made_for, curves });
@@ -1923,6 +2015,9 @@ impl App {
             for p in profiles::list(&dir) {
                 add(p, true);
             }
+        }
+        for row in rows.iter_mut().filter(|r| r.made.is_some() && r.made_for.is_none() && !r.info.model.is_empty()) {
+            row.made_for = Some(row.info.model.clone());
         }
         // This display's first, then the rest, each newest first
         let other = |r: &ProfileRow| r.made_for.as_deref().is_some_and(|o| o != output);
@@ -2694,6 +2789,21 @@ fn with_field(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+/// A display's name without its model: "eDP-1 (Sharp Corporation eDP-1)"
+/// -> "eDP-1"
+fn short_name(name: &str) -> &str {
+    name.split_once(" (").map_or(name, |(n, _)| n)
+}
+
+/// The file name (without extension) a profile named `name` is saved
+/// under: the name with path separators, colons (which Finder shows as
+/// slashes) and control characters made "-". None for a name that leaves
+/// nothing, or would be a hidden file.
+fn profile_stem(name: &str) -> Option<String> {
+    let stem: String = name.trim().chars().map(|c| if matches!(c, '/' | '\\' | ':') || c.is_control() { '-' } else { c }).collect();
+    (!stem.is_empty() && !stem.starts_with('.')).then_some(stem)
+}
+
 /// The output a DisplayCraft profile was made for, from its name
 /// ("eDP-1-20261012-204053.icc" -> "eDP-1"); None for other profiles
 fn made_for(file_name: &str) -> Option<&str> {
@@ -2863,6 +2973,11 @@ mod hardware_tests {
                         button.click();
                     }
                 }
+            }
+            // Measured and waiting for a name: keep the one offered
+            if harness.state().cal_run.as_ref().is_some_and(|r| r.naming.is_some()) {
+                harness.get_by_label("Save").click();
+                continue;
             }
             if harness.state().job.is_none() {
                 return;
@@ -3074,6 +3189,15 @@ mod tests {
         assert_eq!(super::made_for("HDMI-A-1-20261012-204053.icc"), Some("HDMI-A-1"));
         assert_eq!(super::made_for("7JXK8-LQ170R1 #1 2024-09-08 15-17 2.2 F-S XYZLUT+MTX.icc"), None);
         assert_eq!(super::display_name("Monitor 2, Output DP-3 (Dell U2413) at 2560, 0, width 1920, height 1200"), "DP-3 (Dell U2413)");
+    }
+
+    #[test]
+    fn profile_names_from_user_names() {
+        assert_eq!(super::profile_stem("  Built-in Display 2026-10-13 16:29 "), Some("Built-in Display 2026-10-13 16-29".into()));
+        assert_eq!(super::profile_stem("a/b\\c"), Some("a-b-c".into()));
+        assert_eq!(super::profile_stem("   "), None);
+        assert_eq!(super::profile_stem(".hidden"), None);
+        assert_eq!(super::short_name("eDP-1 (Sharp Corporation eDP-1)"), "eDP-1");
     }
 
     #[test]

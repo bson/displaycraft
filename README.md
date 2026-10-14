@@ -35,7 +35,11 @@ A display report can be saved as a reference, and other displays, on the
 same computer or elsewhere, calibrated to match it: the same white point,
 brightness, black point and 50% gray, so they look alike. Each profile can
 have one saved with it too, so a display that has drifted can be brought
-back to how it looked when the profile was made. Black can be
+back to how it looked when the profile was made.
+
+![Saving a display's report as a reference](screenshots/reference.png)
+
+![Calibrating another display to match it](screenshots/match.png) Black can be
 raised from the display's deepest, for a contrast range like print's, with
 the dark grays kept neutral.
 

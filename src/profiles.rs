@@ -132,6 +132,61 @@ fn find_tag<'a>(b: &'a [u8], sig: &[u8; 4]) -> Option<&'a [u8]> {
     })
 }
 
+/// The data of a 'data' type tag (ICC dataType), text or binary
+pub fn data_tag(b: &[u8], sig: &[u8; 4]) -> Option<Vec<u8>> {
+    let t = find_tag(b, sig).filter(|t| t.starts_with(b"data"))?;
+    let data = t.get(12..)?;
+    // Text data is null-terminated; binary data is taken as it is
+    Some(match be32(t, 8)? {
+        0 => data[..data.iter().position(|&c| c == 0).unwrap_or(data.len())].to_vec(),
+        _ => data.to_vec(),
+    })
+}
+
+/// The profile with a binary 'data' type tag `sig` added, or None if it
+/// isn't a profile or already has the tag. Every other tag is shifted by
+/// the new table entry, and the new data goes at the end.
+pub fn add_data_tag(b: &[u8], sig: &[u8; 4], data: &[u8]) -> Option<Vec<u8>> {
+    if b.get(36..40)? != b"acsp" || find_tag(b, sig).is_some() {
+        return None;
+    }
+    let count = be32(b, 128)? as usize;
+    let table_end = 132 + count * 12;
+    let size = (be32(b, 0)? as usize).min(b.len());
+    if size < table_end {
+        return None;
+    }
+    let mut out = Vec::with_capacity(size + 12 + 16 + data.len());
+    out.extend(&b[..128]);
+    out.extend((count as u32 + 1).to_be_bytes());
+    for i in 0..count {
+        let at = 132 + i * 12;
+        out.extend(&b[at..at + 4]);
+        out.extend((be32(b, at + 4)? + 12).to_be_bytes());
+        out.extend(&b[at + 8..at + 12]);
+    }
+    let entry = out.len();
+    out.extend([0u8; 12]);
+    out.extend(&b[table_end..size]);
+    // Tags start on 4-byte boundaries
+    out.resize(out.len().next_multiple_of(4), 0);
+    let offset = out.len() as u32;
+    out.extend(b"data\0\0\0\0");
+    out.extend(1u32.to_be_bytes());
+    out.extend(data);
+    let tag_size = out.len() as u32 - offset;
+    out.resize(out.len().next_multiple_of(4), 0);
+    out[entry..entry + 4].copy_from_slice(sig);
+    out[entry + 4..entry + 8].copy_from_slice(&offset.to_be_bytes());
+    out[entry + 8..entry + 12].copy_from_slice(&tag_size.to_be_bytes());
+    let total = out.len() as u32;
+    out[0..4].copy_from_slice(&total.to_be_bytes());
+    // A profile ID is an MD5 of the profile as it was. Zero means "not
+    // computed", which is valid, where a stale one fails validation.
+    out[84..100].fill(0);
+    Some(out)
+}
+
 /// Sample a 'curv' or 'para' tag at SAMPLES points
 fn sample_trc(t: &[u8]) -> Option<Vec<f64>> {
     let at = |i: usize| i as f64 / (SAMPLES - 1) as f64;
@@ -451,6 +506,24 @@ mod tests {
         assert!((cct - 5500.0).abs() < 60.0, "{cct}");
         assert!(!info.lut);
         assert!(parse(b"not a profile").is_none());
+    }
+
+    #[test]
+    fn adds_a_data_tag() {
+        let before = profile("eDP-1 D55", [0.95497, 1.0, 0.91754]);
+        let mut b = before.clone();
+        let len = b.len() as u32;
+        b[0..4].copy_from_slice(&len.to_be_bytes());
+        b[84] = 7;
+        let after = add_data_tag(&b, b"DCrf", "white = 1.5 # cd/m²".as_bytes()).unwrap();
+        assert_eq!(data_tag(&after, b"DCrf").unwrap(), "white = 1.5 # cd/m²".as_bytes());
+        assert_eq!(be32(&after, 0).unwrap() as usize, after.len());
+        assert_eq!(after.len() % 4, 0);
+        assert_eq!(&after[84..100], &[0u8; 16]);
+        // The other tags still read
+        assert_eq!(parse(&after).unwrap(), parse(&before).unwrap());
+        assert!(add_data_tag(&after, b"DCrf", b"again").is_none());
+        assert!(data_tag(&before, b"DCrf").is_none());
     }
 
     #[test]

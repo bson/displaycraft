@@ -741,8 +741,9 @@ impl App {
         self.start_job(ctx, JobKind::Colprof, &bin, "colprof", &args);
     }
 
-    /// A reference beside the profile `icc`, from the patches measured for
-    /// it, so the display can be brought back to how it looks now
+    /// A reference in the profile `icc`, from the patches measured for it,
+    /// so the display can be brought back to how it looks now. Must be done
+    /// before the profile is installed, so the installed copy has it too.
     fn save_profile_reference(&self, run: &CalRun, icc: &std::path::Path) -> Result<(), String> {
         let ti3 = std::fs::read_to_string(run.base.with_extension("ti3")).map_err(|e| format!("can't read the measurements: {e}"))?;
         let patches = reference::read_ti3(&ti3).ok_or("the measurements are incomplete")?;
@@ -758,7 +759,7 @@ impl App {
             black_target: Some(run.black_target),
         };
         let r = reference::Reference::from_patches(about, patches)?;
-        r.save(&icc.with_extension("dcref")).map_err(|e| e.to_string())
+        r.save_in_profile(icc)
     }
 
     /// What's shown above a job's progress: "Step 3: calibrating" for a
@@ -1051,12 +1052,12 @@ impl App {
                     return;
                 }
                 let _ = std::fs::remove_file(&run.quick);
-                let reference = self.settings.profile_reference.then(|| self.save_profile_reference(&run, &icc));
+                let reference = self.save_profile_reference(&run, &icc);
                 let mut summary = run.summary;
                 // "Profile check complete, peak err = 2.1, avg err = 0.5"
                 summary.extend(self.log.iter().filter(|l| l.contains("peak err")).last().map(|l| l.trim().to_string()));
-                if let Some(Err(why)) = reference {
-                    summary.push(format!("Reference not saved: {why}"));
+                if let Err(why) = reference {
+                    summary.push(format!("Reference not saved in the profile: {why}"));
                 }
                 self.outcome = Some(Outcome { cal, icc, summary, installed: false });
                 self.status = Some((true, "Calibration and profile done".into()));
@@ -2023,18 +2024,6 @@ impl App {
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && Self::name_problem(&edited).is_none() {
                 save = true;
             }
-            ui.add_space(8.0);
-            if ui
-                .checkbox(&mut self.settings.profile_reference, "Save a reference")
-                .on_hover_text(
-                    "Also save what the display shows with this profile: its white point, brightness, black and 50% \
-                     gray. Matching it later brings a display that has drifted back to how it looks now, and it can \
-                     be used to make other displays look the same.",
-                )
-                .changed()
-            {
-                self.save_settings();
-            }
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -2257,9 +2246,9 @@ impl App {
             let toggled = ui
                 .checkbox(&mut self.settings.match_reference, "Match a reference")
                 .on_hover_text(
-                    "Calibrate to look like a display reference, saved with a profile or from a display's report: its \
-                     white point, brightness, black and 50% gray. Matching this display's own earlier profile brings \
-                     it back to how it looked then.",
+                    "Calibrate to look like a profile DisplayCraft made, or a reference saved from a display's report: \
+                     its white point, brightness, black and 50% gray. Matching this display's own earlier profile \
+                     brings it back to how it looked then.",
                 )
                 .changed();
             if toggled {
@@ -2302,7 +2291,7 @@ impl App {
 
     fn browse_reference(&mut self) {
         let mut dialog =
-            rfd::FileDialog::new().set_title("Display reference to match").add_filter("DisplayCraft reference", &["dcref"]);
+            rfd::FileDialog::new().set_title("Display reference to match").add_filter("References and profiles", &["dcref", "icc", "icm"]);
         // Where the profiles' references are
         if let Ok(dir) = Self::data_dir() {
             dialog = dialog.set_directory(dir);

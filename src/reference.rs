@@ -1,7 +1,9 @@
 //! Display references (.dcref): what a display showed when measured, saved
 //! so a display, this one after it has drifted or another here or on
 //! another computer, can be calibrated to look the same. Made from a
-//! report's measurements, or from a profile's beside it.
+//! report's measurements, saved as a .dcref file, or from a profile's,
+//! kept in the profile itself in a private tag (TAG). Either way it's the
+//! same TOML text.
 //!
 //! Matching uses white's chromaticity, its luminance, the 50% gray and the
 //! black level the reference was calibrated to. White and 50% gray set how
@@ -13,10 +15,14 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::report;
+use crate::{profiles, report};
 
 /// Bumped only for changes older DisplayCraft can't read sensibly
 pub const FORMAT: u32 = 1;
+
+/// The profile tag holding a reference. Programs that don't know a tag
+/// ignore it, as the ICC specification has them do.
+pub const TAG: &[u8; 4] = b"DCrf";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Reference {
@@ -176,13 +182,43 @@ impl Reference {
         })
     }
 
-    pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let text = toml::to_string(self).map_err(std::io::Error::other)?;
-        std::fs::write(path, format!("# DisplayCraft display reference\n{text}"))
+    fn text(&self) -> Result<String, String> {
+        let text = toml::to_string(self).map_err(|e| e.to_string())?;
+        Ok(format!("# DisplayCraft display reference\n{text}"))
     }
 
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::write(path, self.text().map_err(std::io::Error::other)?)
+    }
+
+    /// Put the reference in the profile `icc`. The profile is replaced
+    /// whole, by renaming, so a failure leaves it as it was.
+    pub fn save_in_profile(&self, icc: &Path) -> Result<(), String> {
+        let b = std::fs::read(icc).map_err(|e| e.to_string())?;
+        let with = profiles::add_data_tag(&b, TAG, self.text()?.as_bytes()).ok_or("the profile can't take it")?;
+        let tmp = icc.with_extension("icc-new");
+        std::fs::write(&tmp, with).and_then(|()| std::fs::rename(&tmp, icc)).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e.to_string()
+        })
+    }
+
+    /// From a .dcref file, or from a profile DisplayCraft made
     pub fn load(path: &Path) -> Result<Reference, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("Can't read {}: {e}", path.display()))?;
+        let b = std::fs::read(path).map_err(|e| format!("Can't read {}: {e}", path.display()))?;
+        let text = if profiles::parse(&b).is_some() {
+            let Some(data) = profiles::data_tag(&b, TAG) else {
+                // Profiles made before references went in them have one beside
+                let beside = path.with_extension("dcref");
+                if beside.is_file() {
+                    return Reference::load(&beside);
+                }
+                return Err("The profile has no DisplayCraft reference".into());
+            };
+            String::from_utf8(data).map_err(|_| "The profile's reference is damaged".to_string())?
+        } else {
+            String::from_utf8(b).map_err(|_| "Not a DisplayCraft reference or a profile".to_string())?
+        };
         let r: Reference = toml::from_str(&text).map_err(|e| format!("Not a DisplayCraft reference: {}", e.message()))?;
         if r.format > FORMAT {
             return Err("The reference was saved by a newer DisplayCraft".into());
@@ -276,9 +312,19 @@ mod tests {
         std::fs::write(&path, "white = 3\n").unwrap();
         assert!(Reference::load(&path).is_err());
         // Without what isn't always known
-        let unknown = Reference { black_target: None, model: None, primaries: None, ..r };
+        let unknown = Reference { black_target: None, model: None, primaries: None, ..r.clone() };
         unknown.save(&path).unwrap();
         assert_eq!(Reference::load(&path).unwrap(), unknown);
+        // In a profile: a bare header and an empty tag table
+        let icc = dir.join("test-profile.icc");
+        let mut b = vec![0u8; 132];
+        b[0..4].copy_from_slice(&132u32.to_be_bytes());
+        b[36..40].copy_from_slice(b"acsp");
+        std::fs::write(&icc, &b).unwrap();
+        assert_eq!(Reference::load(&icc).unwrap_err(), "The profile has no DisplayCraft reference");
+        r.save_in_profile(&icc).unwrap();
+        assert_eq!(Reference::load(&icc).unwrap(), r);
+        assert!(r.save_in_profile(&icc).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

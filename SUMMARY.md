@@ -118,8 +118,9 @@
   drawn with egui or written as SVG; the CIE 1931 spectral locus.
 - `src/report.rs`: the display report's patch set, `.ti3` reading and the
   arithmetic (gamma fit, CCT, u'v' gamut coverage).
-- `src/reference.rs`: display references (`.dcref`), saved from a report
-  and loaded to set the targets to match another display.
+- `src/reference.rs`: display references, saved from a report (`.dcref`)
+  or in a profile's `DCrf` tag, and loaded to set the targets to match
+  another display.
 - `src/layout.rs`: the arrangement of the displays, from `kscreen-doctor
   -j` or else ArgyllCMS's display list, and `display_name()`.
 - `src/profiles.rs`: reading ICC profiles (description, date, white point),
@@ -386,8 +387,7 @@ after `base`, in the data folder, `<output>-<YYYYMMDD-HHMMSS>`:
    then. Measured, the page asks for a name (`CalRun::naming`,
    `naming_panel()`): "Save as", prefilled with the display's short name
    and the time ("eDP-1 2026-10-13 17:10"), with Save (or Enter) and
-   Discard, and a "Save a reference" checkbox beside the name
-   (`Settings::profile_reference`, on by default and remembered). `profile_stem()` makes the file name: path separators, colons
+   Discard. `profile_stem()` makes the file name: path separators, colons
    (Finder shows them as slashes) and control characters become "-"; empty
    or hidden-file names aren't accepted, nor one already used by a profile
    in the data folder or installed (`name_problem()`). Save renames the
@@ -751,10 +751,21 @@ the patches alone, so a report's and a profile's are made alike: white and
 black are the median of the patches at full drive and at zero, and the
 primaries (black subtracted) are left out where there are no pure ones.
 
-With "Save a reference" checked, a profile gets one too, beside
-DisplayCraft's own copy in the data folder (`<name>.dcref`, on every
-platform; installed copies are in system folders and get none), written once
-colprof has made the profile (`save_profile_reference()`). It's made from the
+Every profile DisplayCraft makes carries one too, in the profile itself:
+a private `DCrf` tag (`reference::TAG`) of the ICC `data` type, binary,
+holding the same TOML as a `.dcref` (UTF-8, which the `text` type, 7-bit
+ASCII, isn't for). `data` is a v2 type, so it suits ArgyllCMS's v2.2
+profiles, and programs that don't know a tag ignore it, so colord, KWin,
+ColorSync and Windows are unaffected. The tag is added once colprof has
+made the profile and before it can be installed, so installed copies have
+it too (`save_profile_reference()`, `Reference::save_in_profile()`).
+`profiles::add_data_tag()` rewrites the profile: a table entry more, every
+other tag's offset moved by its 12 bytes, the new data at the end on a
+4-byte boundary, the header's size updated, and the profile ID zeroed
+("not computed", valid, where a stale MD5 isn't; colprof leaves it zero for
+v2 anyway). The profile is replaced by renaming a new file over it. It's
+done in DisplayCraft rather than in colprof because Preferences can choose
+another ArgyllCMS, without such an option. It's made from the
 profile's own `.ti3`, read with `reference::read_ti3()` (first table only;
 the `.cal` follows as a second): targen's `-g9 -e4 -B4` puts 50% gray in a
 9-step gray ramp, and white and black four times each, in every quality's
@@ -763,7 +774,7 @@ patches were measured, and the black point the run was calibrated to,
 recorded when it started (`CalRun::black_target`) since the targets can
 change while the profile is named. On a D55 gamma 2.2 profile of this panel
 it gave 5507 K, 215.5 cd/m², black 0.130 and `gamma50` 2.18. A failure is
-added to the run's summary ("Reference not saved: ..."). Matching it later
+added to the run's summary ("Reference not saved in the profile: ..."). Matching it later
 recalibrates a display that has drifted back to how it looked with the
 profile.
 The black target is the calibration's setting, from `TARGET_BLACK_BRIGHTNESS`
@@ -776,7 +787,10 @@ when asked for.
 
 The Measure page has a "Match a reference" checkbox with Browse…, greyed
 out unless it's checked (`reference_panel()`). Browse opens in the data
-folder, where the profiles' references are. A reference loaded
+folder, where the profiles are, and takes a `.dcref` or a profile
+(`Reference::load()` tells them apart by the profile header). A profile
+without the tag but with a `.dcref` beside it, as DisplayCraft saved them
+before references went into profiles, gives that one. A reference loaded
 (`use_reference()`) sets the targets: white to its x,y, brightness to its
 white luminance (rounded, as dispcal's `-b` is whole cd/m², and clamped to the
 field's 40-600), the black point to the reference's black target (device
@@ -827,7 +841,8 @@ KWin keeps the path but switches to sRGB.
 - Stop using a profile: `dispwin -d D -U`, which deletes the installed copy
   and returns KWin to sRGB; DisplayCraft's own copy stays.
 - Delete (DisplayCraft's profiles not in use, after confirmation): the
-  `.icc` and its `.cal`. If it has a `.dcref`, the confirmation has an
+  `.icc` and its `.cal`. If it has a `.dcref` beside it (from before
+  references went into profiles), the confirmation has an
   "Also delete its reference" checkbox, off by default, since the reference
   can still bring a display back to how it looked with the profile.
 

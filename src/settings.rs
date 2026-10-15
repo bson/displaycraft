@@ -24,8 +24,6 @@ pub struct Settings {
     pub correction: Option<PathBuf>,
     /// The last calibration targets chosen
     pub targets: Targets,
-    /// Save a display reference (.dcref) beside each profile made
-    pub profile_reference: bool,
     /// Calibrate to match `reference_file`, whose values are in `targets`
     pub match_reference: bool,
     pub reference_file: Option<PathBuf>,
@@ -42,7 +40,6 @@ impl Default for Settings {
             theme: None,
             correction: None,
             targets: Targets::default(),
-            profile_reference: true,
             match_reference: false,
             reference_file: None,
             unmatched_targets: None,
@@ -93,7 +90,6 @@ mod tests {
             theme: Some("Paper".into()),
             correction: Some("/usr/local/share/ArgyllCMS/WLEDFamily_07Feb11.ccss".into()),
             targets: Targets { white: crate::targets::White::D55, ..Targets::default() },
-            profile_reference: false,
             match_reference: true,
             reference_file: Some("/home/u/.local/share/displaycraft/DP-3 2026-10-14.dcref".into()),
             unmatched_targets: Some(Targets::default()),
@@ -104,6 +100,5 @@ mod tests {
         let older: Settings = toml::from_str("theme = \"Midnight\"\nsomething_new = 3\n").unwrap();
         assert_eq!(older.theme.as_deref(), Some("Midnight"));
         assert_eq!(older.argyll_bin, None);
-        assert!(older.profile_reference);
     }
 }

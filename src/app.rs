@@ -1784,10 +1784,11 @@ impl App {
         Self::gap(ui);
         ui.label("Choose what the calibration and profiling should aim for:");
         Self::gap(ui);
-        if let Some(name) = self.reference_file_name().filter(|_| self.reference.is_some()) {
-            Self::context_line(ui, format!("Set to match {name}, chosen on the Measure page."));
-            Self::gap(ui);
-        }
+        // Above the fields it sets. Fixed once a run has started: dispcal
+        // has the targets, and the run records the reference's black target.
+        let naming = self.cal_run.as_ref().is_some_and(|r| r.naming.is_some());
+        ui.add_enabled_ui(!running && !naming, |ui| self.reference_panel(ui));
+        Self::gap(ui);
         let tg = &mut self.settings.targets;
         // Fixed while adjusting: dispcal took the targets when it started
         ui.add_enabled_ui(!running, |ui| {
@@ -1960,18 +1961,21 @@ impl App {
             Self::gap(ui);
         }
         Self::context_line(ui, format!("Parameters: {}", self.settings.targets.describe()));
+        if let Some(name) = self.reference_file_name().filter(|_| self.reference.is_some()) {
+            Self::context_line(ui, format!("Set to match {name}."));
+        }
         Self::gap(ui);
         Self::context_line(ui, "Note: dark patches may need long integration times for accuracy.".into());
         Self::gap(ui);
         let running = self.job.is_some();
         let naming = self.cal_run.as_ref().is_some_and(|r| r.naming.is_some());
-        // Fixed once measuring starts: the targets have been given to dispcal
-        ui.add_enabled_ui(!running && !naming, |ui| self.reference_panel(ui));
-        Self::gap(ui);
         if naming {
             self.naming_panel(ui);
         } else if self.settings.match_reference && self.reference.is_none() && !running {
-            ui.label(RichText::new("Choose a reference to match, or turn off Match a reference.").color(t.caution));
+            ui.label(
+                RichText::new("Choose a reference to match on the Parameters page, or turn off Match a reference there.")
+                    .color(t.caution),
+            );
             Self::gap(ui);
             ui.add_enabled(false, egui::Button::new(RichText::new("Begin").font(t.semibold(13.0))));
         } else if self.job_controls(ui, JobKind::Calibrate, false, true) {
@@ -3808,10 +3812,10 @@ mod page_pictures {
                 harness.state_mut().start_job(&ctx, JobKind::Calibrate, std::path::Path::new("/usr/bin"), "sleep", &args);
                 harness.run_steps(2);
             }
-            if matches!(name, "run-reference" | "run-reference-none" | "targets-reference") {
+            if matches!(name, "run-reference" | "run-reference-none" | "targets-reference" | "targets-reference-none") {
                 let app = harness.state_mut();
                 app.settings.match_reference = true;
-                if name != "run-reference-none" {
+                if !name.ends_with("-none") {
                     let about = reference::About {
                         display: "DP-3 (ASUSTek COMPUTER INC PA279CRV)".into(),
                         model: Some("ASUSTek COMPUTER INC PA279CRV".into()),
@@ -3971,6 +3975,7 @@ mod page_pictures {
         shoot(Step::Run, 640.0, false, "run-reference");
         shoot(Step::Run, 640.0, false, "run-reference-none");
         shoot(Step::Targets, 640.0, false, "targets-reference");
+        shoot(Step::Targets, 640.0, false, "targets-reference-none");
         shoot(Step::Targets, 1100.0, false, "targets-adjusting");
         shoot(Step::Preferences, 640.0, false, "preferences");
         shoot(Step::About, 640.0, false, "about");

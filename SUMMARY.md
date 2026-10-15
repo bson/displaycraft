@@ -785,8 +785,9 @@ didn't make. It's made when the
 report finishes, so it carries the time of the measurement, and written only
 when asked for.
 
-The Measure page has a "Match a reference" checkbox with Browse…, greyed
-out unless it's checked (`reference_panel()`). Browse opens in the data
+The Parameters page has a "Match a reference" checkbox with Browse…, greyed
+out unless it's checked (`reference_panel()`), above the fields it sets. Both
+are fixed while a job runs or a measured profile waits to be named. Browse opens in the data
 folder, where the profiles are, and takes a `.dcref` or a profile
 (`Reference::load()` tells them apart by the profile header). A profile
 without the tag but with a `.dcref` beside it, as DisplayCraft saved them
@@ -803,9 +804,10 @@ Settings keep the checkbox (`match_reference`), the file (`reference_file`,
 read again at startup, with its error shown if it's gone) and the targets
 from before matching (`unmatched_targets`, taken on the first reference
 only); unchecking puts back white, tone, brightness and black from those,
-leaving quality and profile type. Checked with no reference, Begin is
-disabled with a note to choose one. Parameters says "Set to match <file>,
-chosen on the Measure page." while matching; its fields stay editable.
+leaving quality and profile type. Checked with no reference, the Measure page's
+Begin is disabled with a note to choose one on Parameters. Measure says
+"Set to match <file>." under the parameters while matching. The fields stay
+editable.
 dispcal's `-g` aims its curve through `0.5^gamma` of white at 50% input,
 black included (`tech_gamma()` in `dispcal.c`), so with the brightness
 matched this puts 50% gray at the reference's luminance, which is much of

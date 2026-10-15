@@ -14,11 +14,18 @@ brightness, gamma), and measure.
 ![Choosing a display](screenshots/display.png)
 
 Measuring calibrates the display, makes an ICC profile (shaper+matrix or
-LUT) from a set of measured patches, and installs it. Before calibrating,
-a monitor's own white point, brightness and black level controls can be
-adjusted with live readings.
+LUT) from a set of measured patches, and installs it. The targets are a
+white point, a tone curve, and optionally white's brightness and a black
+point: black can be raised from the display's deepest, for a contrast
+range like print's, with the dark grays kept neutral.
 
 ![Calibrating](screenshots/measure.png)
+
+Before calibrating, a monitor's own controls can be set from its menus
+while black, 50% gray and white are read over and over, each shown against
+its target with how far its color is from the target white.
+
+![Adjusting a monitor's controls](screenshots/adjust.png)
 
 Verification measures how accurately a profile describes the display, and
 gives a printable HTML report with charts; results can be exported as CSV.
@@ -32,6 +39,16 @@ contrast, gamma, white point and gamut coverage, uncalibrated or as
 calibrated.
 
 ![The profiles for a display](screenshots/profiles.png)
+
+A display report can be saved as a reference, and other displays, on the
+same computer or elsewhere, calibrated to match it: the same white point,
+brightness, black point and 50% gray, so they look alike. Each profile
+carries one too, so a display that has drifted can be brought back to how
+it looked when the profile was made.
+
+![Saving a display's report as a reference](screenshots/reference.png)
+
+![Calibrating another display to match it](screenshots/match.png)
 
 ## Download
 

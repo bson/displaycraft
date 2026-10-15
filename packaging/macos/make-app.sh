@@ -139,7 +139,7 @@ app=$work/DisplayCraft.app
 res=$app/Contents/Resources
 mkdir -p "$app/Contents/MacOS" "$res/argyll/bin" "$res/doc"
 cp "$cache/target/release/displaycraft" "$app/Contents/MacOS/"
-for p in dispcal dispread dispwin targen colprof fakeread colverify spotread ccxxmake oeminst iccdump; do
+for p in dispcal dispread dispwin targen colprof fakeread colverify spotread instled ccxxmake oeminst iccdump; do
     cp "$work/argyll/bin/$p" "$res/argyll/bin/"
 done
 strip "$res"/argyll/bin/* "$app/Contents/MacOS/displaycraft"

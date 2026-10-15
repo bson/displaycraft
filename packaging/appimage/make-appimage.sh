@@ -140,7 +140,7 @@ mkdir -p "$app/usr/bin" "$app/usr/lib/argyll/bin" "$app/usr/share/applications" 
 cp "$cache/target/release/displaycraft" "$app/usr/bin/"
 # The ArgyllCMS programs DisplayCraft runs, and a few for instrument setup
 # and corrections from the command line
-for p in dispcal dispread dispwin targen colprof fakeread colverify spotread ccxxmake oeminst iccdump; do
+for p in dispcal dispread dispwin targen colprof fakeread colverify spotread instled ccxxmake oeminst iccdump; do
     cp "$work/argyll/bin/$p" "$app/usr/lib/argyll/bin/"
 done
 strip "$app"/usr/lib/argyll/bin/* "$app/usr/bin/displaycraft"

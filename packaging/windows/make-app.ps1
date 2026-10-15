@@ -175,7 +175,7 @@ $app = "$Work\DisplayCraft"
 if (Test-Path $app) { throw "$app already exists; is it another folder under a different case?" }
 New-Item -ItemType Directory -Force "$app\argyll\bin", "$app\doc" | Out-Null
 Copy-Item "$Cache\target\release\displaycraft.exe", "$Src\assets\displaycraft.ico" $app
-foreach ($p in 'dispcal', 'dispread', 'dispwin', 'targen', 'colprof', 'fakeread', 'colverify', 'spotread', 'ccxxmake', 'oeminst', 'iccdump') {
+foreach ($p in 'dispcal', 'dispread', 'dispwin', 'targen', 'colprof', 'fakeread', 'colverify', 'spotread', 'instled', 'ccxxmake', 'oeminst', 'iccdump') {
     Copy-Item "$Work\argyll\bin\$p.exe" "$app\argyll\bin\"
 }
 Copy-Item -Recurse "$Work\argyll\ref" "$app\argyll\ref"

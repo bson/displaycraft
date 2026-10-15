@@ -105,6 +105,12 @@ impl JobKind {
         !matches!(self, JobKind::Targen | JobKind::Colprof | JobKind::InstallRule)
     }
 
+    /// Whether the job's program reads patches, making the instrument's
+    /// light pulse (the fork's dispsup.c) until it's done
+    fn measures(self) -> bool {
+        matches!(self, JobKind::Calibrate | JobKind::Adjust | JobKind::ProfileRead | JobKind::Verify | JobKind::Report)
+    }
+
     /// The page that shows this job
     fn step(self) -> Step {
         match self {
@@ -367,6 +373,8 @@ pub struct App {
     ctx: egui::Context,
     /// A scan for displays and instruments in progress
     scan: Option<Receiver<Scan>>,
+    /// instled lighting the instruments' indicators, after a scan
+    lighting: Option<Receiver<()>>,
     /// How KDE arranges the outputs, for the Display page's map
     layout: Vec<layout::Output>,
     /// Instruments plugged in that the user can't open
@@ -456,6 +464,7 @@ impl App {
         let mut app = App {
             ctx: cc.egui_ctx.clone(),
             scan: None,
+            lighting: None,
             layout: Vec::new(),
             blocked: Vec::new(),
             bin: argyll::find_bin_dir(settings.argyll_bin.as_deref()),
@@ -570,11 +579,46 @@ impl App {
                 self.display_type = self.display_type.filter(|&i| i < inv.display_types.len());
                 self.inventory = inv;
                 self.inventory_error = None;
+                self.set_lights(true);
             }
             Err(e) => {
                 self.inventory = Inventory::default();
                 self.inventory_error = Some(e);
             }
+        }
+    }
+
+    /// Turn the indicator of each instrument found (an i1Display Pro's
+    /// white light) on, to show DisplayCraft has it, or off. The fork's
+    /// i1Display Pro driver leaves it on once opened and pulses it while
+    /// reading patches. Only the bundled ArgyllCMS has instled; with
+    /// another, nothing happens. Opening an instrument takes seconds, so it
+    /// runs on its own thread, and measuring waits for it (`ready()`): two
+    /// programs can't have an instrument open at once.
+    fn set_lights(&mut self, on: bool) {
+        let Some(bin) = self.bin.clone() else { return };
+        let ports: Vec<String> = self.inventory.instruments.iter().map(|i| i.value.clone()).collect();
+        if ports.is_empty() {
+            return;
+        }
+        // One at a time: a newer request waits for the running one
+        let before = self.lighting.take();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            if let Some(before) = before {
+                let _ = before.recv();
+            }
+            run_instled(&bin, &ports, on);
+            let _ = tx.send(());
+            ctx.request_repaint();
+        });
+        self.lighting = Some(rx);
+    }
+
+    fn poll_lighting(&mut self) {
+        if self.lighting.as_ref().is_some_and(|rx| !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))) {
+            self.lighting = None;
         }
     }
 
@@ -594,6 +638,8 @@ impl App {
             Err("No display found")
         } else if self.inventory.instruments.is_empty() {
             Err(NO_INSTRUMENT)
+        } else if self.lighting.is_some() {
+            Err("Starting the instrument…")
         } else {
             Ok(())
         }
@@ -1006,6 +1052,11 @@ impl App {
         }
         let cancelled = std::mem::take(&mut self.cancelled);
         let ok = code == Some(0) && !cancelled;
+        // Stopped by a signal (Cancel) or failing, the program may not have
+        // put the light back from pulsing to steady
+        if kind.measures() && !ok {
+            self.set_lights(true);
+        }
         match kind {
             JobKind::Calibrate | JobKind::Targen | JobKind::ProfileRead | JobKind::Colprof => {
                 if cancelled || !ok {
@@ -3361,9 +3412,22 @@ fn output_name(description: &str) -> String {
     if name.is_empty() { "display".into() } else { name }
 }
 
+/// `instled -c N on|off` for each instrument port, waiting for each
+fn run_instled(bin: &std::path::Path, ports: &[String], on: bool) {
+    for port in ports {
+        let _ = argyll::command(bin.join("instled"))
+            .args(["-c", port, if on { "on" } else { "off" }])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
 impl eframe::App for App {
     fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_scan();
+        self.poll_lighting();
         self.poll_job();
     }
 
@@ -3427,6 +3491,20 @@ impl eframe::App for App {
         // measurement state, after the window closes
         if let Some((_, job)) = self.job.as_mut() {
             job.cancel();
+            // instled can't open the instrument until the program has let go
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while job.try_wait().is_none() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        if let Some(lighting) = self.lighting.take() {
+            let _ = lighting.recv_timeout(std::time::Duration::from_secs(15));
+        }
+        // The lights go out with DisplayCraft. Waited for, as the
+        // AppImage's programs go when it exits.
+        let ports: Vec<String> = self.inventory.instruments.iter().map(|i| i.value.clone()).collect();
+        if let Some(bin) = &self.bin {
+            run_instled(bin, &ports, false);
         }
     }
 }
@@ -3444,7 +3522,7 @@ mod hardware_tests {
     /// way a user would.
     pub(super) fn wait_for_scan(harness: &mut Harness<'_, App>) {
         let deadline = Instant::now() + Duration::from_secs(30);
-        while harness.state().scan.is_some() {
+        while harness.state().scan.is_some() || harness.state().lighting.is_some() {
             assert!(Instant::now() < deadline, "the device scan didn't finish");
             std::thread::sleep(Duration::from_millis(50));
             harness.step();

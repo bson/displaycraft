@@ -194,6 +194,22 @@ by `poll_scan()` in `logic()`): the window opens at once, Display and
 Spectro show a spinner, Search Again is disabled and Begin
 explains the wait. A
 new scan replaces a running one, whose result is dropped.
+A scan that finds instruments then turns on their indicator lights, to
+show DisplayCraft has them (`set_lights()`): the fork's `instled -c N on`
+for each, on a thread (`App::lighting`, `poll_lighting()`), since opening
+an instrument takes about 3 s; a newer request waits for the one running.
+The pages show the scan's result at once; measuring waits ("Starting the
+instrument…" from `ready()`), as two programs can't have an instrument
+open at once. The fork's i1Display Pro driver also leaves the light on
+whenever a program opens it, and its dispsup.c flashes it while patches
+are read. A measuring job (`JobKind::measures()`) that's cancelled (SIGTERM
+on Unix, killed on Windows) or fails may leave it flashing, so the light
+is set on again then. Quitting (`on_exit()`) cancels a running job, waits
+up to 5 s for it to let go of the instrument and for any lighting under
+way, then runs `instled off` and waits for it (about 3 s more), since the
+AppImage's programs go when DisplayCraft exits. An ArgyllCMS without
+instled (an "Other" one) just leaves the light alone; failures are
+ignored.
 
 ## Running ArgyllCMS
 
@@ -501,7 +517,7 @@ may lack, are bundled in `usr/lib/argyll/lib` and found through an
 DisplayCraft would pass on to every program it starts. Its Wayland protocol
 definitions come with it (`wlproto/` in the fork), as Ubuntu 24.04's are
 too old. DisplayCraft is built with
-rustup's stable Rust. The AppDir holds `usr/bin/displaycraft`, eleven
+rustup's stable Rust. The AppDir holds `usr/bin/displaycraft`, twelve
 ArgyllCMS programs in `usr/lib/argyll/bin` (those DisplayCraft runs, plus
 spotread, ccxxmake, oeminst and iccdump), the vendor corrections in
 `usr/lib/argyll/ref` (found by `corrections::find()` beside the bin folder,
@@ -530,7 +546,7 @@ are copied as for the AppImage, ArgyllCMS built with the same
 environment keeps Homebrew's directories off `PATH` too), stopping if it
 installed no `dispcal`, since jam can succeed having built nothing,
 DisplayCraft with `cargo --locked`. `DisplayCraft.app`: `Contents/MacOS/displaycraft`, the
-same eleven ArgyllCMS programs in `Contents/Resources/argyll/bin` and the
+same twelve ArgyllCMS programs in `Contents/Resources/argyll/bin` and the
 corrections in `.../argyll/ref` (`system::MacOs::bundled_dir()` looks
 there, beside the executable, unless `DISPLAYCRAFT_ARGYLL_BIN` is set),
 licences and `ARGYLLCMS.txt` (with the commit) in `Resources/doc`, an
@@ -568,7 +584,7 @@ that folder already exists;
 ArgyllCMS builds with the usual `-sBUILTIN_*` options, `MINGW` and a
 relative `DESTDIR`; DisplayCraft with `cargo +stable-x86_64-pc-windows-gnu
 build --release --locked`. The folder has `displaycraft.exe`,
-`displaycraft.ico`, the eleven ArgyllCMS programs in `argyll\bin`
+`displaycraft.ico`, the twelve ArgyllCMS programs in `argyll\bin`
 (`Single::bundled_dir()`), `argyll\ref`, and licences and `ARGYLLCMS.txt`
 with the commit in `doc`. The script fails if any program imports a DLL
 that isn't in System32 (objdump -p). Out of it come

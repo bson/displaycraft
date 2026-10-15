@@ -585,7 +585,7 @@ with ImageMagick.
 build and upload their files as artifacts (two weeks; one upload step
 per file, as unzipped uploads take one each); "Run workflow" on the
 Actions tab stops there. On a `v*` tag, a `release` job that needs all of them
-downloads them and publishes a GitHub release with all of them
+fetches them and publishes a GitHub release with all of them
 (`gh release create`, with generated notes), so a release only appears
 when every platform built. If a release for the tag already exists, the
 job leaves it as it is.
@@ -593,7 +593,7 @@ job leaves it as it is.
 Releases: a test build's files can be published once they've been tried,
 so the release is exactly what was tested (test files are kept 14 days):
 
-    gh run download <run id> --repo bson/displaycraft -D tmp/release
+    (fetch the run's files into tmp/release, as below)
     gh release create v<version> tmp/release/* --repo bson/displaycraft \
         --target <the run's commit> --title "DisplayCraft <version>" --generate-notes
 
@@ -603,9 +603,21 @@ must be `v` plus Cargo.toml's version, which the tag build checks. A tag
 names a commit whose workflow has this check, so a run made before the
 check was added is released from a later commit with the same code. Each job caches its build output keyed on
 `Cargo.lock` (and appimagetool or jam). Uploads use
-`upload-artifact@v7` with `archive: false`, so the AppImage and the disk
-image download as they are (the artifact takes the file's name), and the
-release job's `download-artifact@v8` passes them through unzipped.
+`upload-artifact@v7` with `archive: false`, so each file downloads as it is (the artifact takes the file's name).
+The release job fetches them through the API (`actions/artifacts/<id>/zip`,
+which for these gives the file itself) and checks each against the
+artifact's SHA-256 digest; it has `actions: read` for that beside
+`contents: write`. `download-artifact@v8` unpacked the Windows zip into a
+folder, which `gh release create` can't upload (v0.2.0's tag build failed
+on it, and its release was made from that run's files by hand), and
+`gh run download` fails on unzipped artifacts altogether, so to make a
+release from a test build, fetch its files the same way:
+
+    gh api repos/bson/displaycraft/actions/runs/<run id>/artifacts \
+        -q '.artifacts[] | "\(.id) \(.name)"' |
+    while read -r id name; do
+        gh api repos/bson/displaycraft/actions/artifacts/$id/zip > "tmp/release/$name"
+    done
 
 Built so far: 17.5 MB, needing glibc 2.39 at most; the bundled ArgyllCMS
 programs need only libwayland-client and libdbus. Started here with fresh
